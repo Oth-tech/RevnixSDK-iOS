@@ -1,0 +1,714 @@
+import Foundation
+import XCTest
+
+@testable import Revnix
+
+/// Behavior tests ported from revnix-react's `resilience.test.ts` — that
+/// file is the policy spec; these must stay in agreement with it. Each test
+/// notes the spec case it mirrors so drift is visible in review.
+final class RevnixClientTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        StubProtocol.reset()
+    }
+
+    // MARK: - Fixtures
+
+    static let dayMs = 24 * 60 * 60 * 1000
+
+    static let entitlementsBody = """
+        {"customerId":"cust_1","cursor":7,"entitlements":[{"entitlementId":"pro","isActive":true,"expiresAt":4102444800000,"sources":[{"kind":"subscription","key":"s1","isActive":true,"expiresAt":4102444800000}]}]}
+        """
+
+    static let purchaseBody = """
+        {"eventId":"evt_1","seq":9,"duplicate":false,"customerId":"cust_1","transferred":false}
+        """
+
+    static let placementBody = """
+        {"status":"ok","placementKey":"main","revision":1,"offering":{"offeringId":"off_1","displayName":"Default","packages":[{"packageId":"pkg_1","productId":"pro.monthly"}]}}
+        """
+
+    /// Entitlements body with an explicit `expiresAt` (REV-157 grace cases).
+    static func entitlementsBody(expiresAt: Int?) -> String {
+        let expiry = expiresAt.map { "\($0)" } ?? "null"
+        return """
+            {"customerId":"cust_1","cursor":5,"entitlements":[{"entitlementId":"pro","isActive":true,"expiresAt":\(expiry),"sources":[]}]}
+            """
+    }
+
+    func makeClient(
+        now: @escaping @Sendable () -> Date = { Date() },
+        storage: RevnixStorage = MemoryStorage(),
+        timeout: TimeInterval = 10,
+        entitlementsTTL: TimeInterval = 30,
+        readYourWritesDelays: [TimeInterval] = [0.25, 0.5, 1, 2],
+        onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil
+    ) -> RevnixClient {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [StubProtocol.self]
+        return RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: storage,
+                timeout: timeout,
+                entitlementsTTL: entitlementsTTL,
+                readYourWritesDelays: readYourWritesDelays,
+                onDiagnostic: onDiagnostic,
+                now: now,
+                session: URLSession(configuration: sessionConfig)
+            ))
+    }
+
+    // MARK: - Request timeout (spec: "C7 request timeout")
+
+    func testHungRequestTimesOutRatherThanHanging() async throws {
+        StubProtocol.hang(containing: "/placements")
+        let client = makeClient(timeout: 0.5)
+        do {
+            _ = try await client.resolvePlacement("main")
+            XCTFail("expected RevnixError.timeout")
+        } catch let err as RevnixError {
+            XCTAssertEqual(err, .timeout)
+            XCTAssertTrue(err.isRetryable)
+        }
+    }
+
+    // MARK: - Typed errors (spec: "C7 typed errors")
+
+    func testRateLimitCarriesRetryAfterMs() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 429,
+            body: #"{"error":"rate limit exceeded"}"#,
+            headers: ["Retry-After": "2"])
+        let client = makeClient()
+        do {
+            _ = try await client.resolvePlacement("main")
+            XCTFail("expected RevnixError.rateLimited")
+        } catch let err as RevnixError {
+            XCTAssertEqual(err, .rateLimited(retryAfterMs: 2000))
+            XCTAssertEqual(err.retryAfterMs, 2000)
+            XCTAssertTrue(err.isRetryable)
+        }
+    }
+
+    func testRetryAfterAcceptsHTTPDateAndToleratesGarbage() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let httpDate = "Thu, 01 Jan 1970 00:16:50 GMT"  // == 1_010 s
+        XCTAssertEqual(
+            RevnixError.parseRetryAfter("2"), 2000)
+        XCTAssertEqual(
+            RevnixError.parseRetryAfter(
+                httpDate, now: Date(timeIntervalSince1970: 1_000)), 10_000)
+        XCTAssertNil(RevnixError.parseRetryAfter(nil, now: now))
+        XCTAssertNil(RevnixError.parseRetryAfter("not-a-date", now: now))
+    }
+
+    func testNetworkFailureIsTypedAsNetworkError() async throws {
+        StubProtocol.failWithConnectionError(containing: "/placements")
+        let client = makeClient()
+        do {
+            _ = try await client.resolvePlacement("main")
+            XCTFail("expected RevnixError.network")
+        } catch let err as RevnixError {
+            guard case .network = err else {
+                return XCTFail("expected .network, got \(err)")
+            }
+            XCTAssertTrue(err.isRetryable)
+        }
+    }
+
+    // MARK: - Entitlement cache (spec: "C7 entitlement cache")
+
+    func testEntitlementsHappyPath() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient()
+        let result = try await client.entitlements()
+        XCTAssertEqual(result.cursor, 7)
+        XCTAssertEqual(result.stale, false)
+        XCTAssertEqual(result.entitlements.first?.entitlementId, "pro")
+        let entitled = await client.isEntitled("pro")
+        XCTAssertTrue(entitled)
+        let notEntitled = await client.isEntitled("gold")
+        XCTAssertFalse(notEntitled)
+    }
+
+    func testFallsBackToCacheWhenNetworkReadFails() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.failWithConnectionError(containing: "/entitlements")
+        // TTL off so the second read genuinely exercises the offline path.
+        let client = makeClient(entitlementsTTL: 0)
+
+        let fresh = try await client.entitlements()
+        XCTAssertEqual(fresh.stale, false)
+        XCTAssertEqual(fresh.entitlements.first?.entitlementId, "pro")
+
+        // Network is down now → the paying customer is still shown entitled.
+        let cached = try await client.entitlements()
+        XCTAssertEqual(cached.stale, true)
+        XCTAssertEqual(cached.entitlements.first?.isActive, true)
+        let entitled = await client.isEntitled("pro")
+        XCTAssertTrue(entitled)
+    }
+
+    func testTransientFailureServesCacheStale() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        // Inject time so the second call is outside the 30 s soft TTL.
+        let clock = Clock(start: Date())
+        let client = makeClient(now: { clock.now() })
+        _ = try await client.entitlements()
+
+        clock.advance(by: 60)
+        StubProtocol.respond(containing: "/entitlements", status: 500, body: #"{"error":"boom"}"#)
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, true)
+    }
+
+    func testCachedEntitlementsReadsCacheWithNoNetworkCall() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient()
+
+        let beforeAnyRead = await client.cachedEntitlements()
+        XCTAssertNil(beforeAnyRead)  // nothing cached yet
+
+        _ = try await client.entitlements()  // caches
+        let cached = await client.cachedEntitlements()
+        XCTAssertEqual(cached?.stale, true)
+        XCTAssertEqual(cached?.entitlements.first?.entitlementId, "pro")
+        // Only the one live fetch happened.
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/entitlements"), 1)
+    }
+
+    // MARK: - Local expiry grace (spec: "REV-157 local expiry")
+
+    /// Warm the cache from a live read, then go offline and serve from cache.
+    private func cachedServe(
+        expiresAt: Int?, storage: RevnixStorage = MemoryStorage()
+    ) async throws -> (client: RevnixClient, cached: CustomerEntitlements) {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200,
+            body: Self.entitlementsBody(expiresAt: expiresAt))
+        StubProtocol.failWithConnectionError(containing: "/entitlements")
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        let fresh = try await client.entitlements()
+        // The fresh read is authoritative — served verbatim even when the
+        // local clock disagrees.
+        XCTAssertEqual(fresh.entitlements.first?.isActive, true)
+        return (client, try await client.entitlements())
+    }
+
+    func testExpiredBeyondGraceServedInactiveFromCache() async throws {
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        let (client, cached) = try await cachedServe(expiresAt: nowMs - 5 * Self.dayMs)
+        XCTAssertEqual(cached.stale, true)
+        XCTAssertEqual(cached.entitlements.first?.isActive, false)
+        let entitled = await client.isEntitled("pro")
+        XCTAssertFalse(entitled)
+    }
+
+    func testExpiredWithinGraceStillActive() async throws {
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        // The renewal an offline device cannot see.
+        let (client, cached) = try await cachedServe(expiresAt: nowMs - 1 * Self.dayMs)
+        XCTAssertEqual(cached.stale, true)
+        XCTAssertEqual(cached.entitlements.first?.isActive, true)
+        let entitled = await client.isEntitled("pro")
+        XCTAssertTrue(entitled)
+    }
+
+    func testNoExpiresAtIsUntouched() async throws {
+        let (_, cached) = try await cachedServe(expiresAt: nil)
+        XCTAssertEqual(cached.entitlements.first?.isActive, true)
+    }
+
+    func testCachedEntitlementsAppliesTheSameExpiryEvaluation() async throws {
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        let (client, _) = try await cachedServe(expiresAt: nowMs - 5 * Self.dayMs)
+        let cached = await client.cachedEntitlements()
+        XCTAssertEqual(cached?.entitlements.first?.isActive, false)
+    }
+
+    // MARK: - Persisted purchase retry (spec: "C7 persisted purchase retry")
+
+    func testPurchaseRetryQueuePersistsAndDrains() async throws {
+        StubProtocol.failWithConnectionError(containing: "/purchases")
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        let input = RegisterPurchaseInput(
+            source: .apple, token: "orig.1", productId: "pro.monthly",
+            transactionId: "txn.1")
+        do {
+            _ = try await client.registerPurchase(input)
+            XCTFail("expected a retryable failure")
+        } catch let err as RevnixError {
+            XCTAssertTrue(err.isRetryable)
+        }
+        let queuedCount = await client.pendingPurchaseCount()
+        XCTAssertEqual(queuedCount, 1)
+        // Persisted under the documented key, keyed source:token:transactionId.
+        let raw = storage.get("revnix.pendingPurchases")
+        XCTAssertNotNil(raw)
+        XCTAssertTrue(raw?.contains("apple:orig.1:txn.1") ?? false)
+
+        // A later launch with connectivity drains the queue (idempotent
+        // server-side via the shared purchaseKey). A FRESH client proves the
+        // queue survived process death, not just in-memory state.
+        StubProtocol.respond(containing: "/purchases", status: 201, body: Self.purchaseBody)
+        let relaunched = makeClient(storage: storage)
+        let delivered = await relaunched.retryPendingPurchases()
+        XCTAssertEqual(delivered, 1)
+        let remaining = await relaunched.pendingPurchaseCount()
+        XCTAssertEqual(remaining, 0)
+    }
+
+    func testSameFailingPurchaseIsNotQueuedTwice() async throws {
+        StubProtocol.failWithConnectionError(containing: "/purchases")
+        let client = makeClient()
+        let input = RegisterPurchaseInput(
+            source: .apple, token: "orig.1", productId: "pro.monthly",
+            transactionId: "txn.1")
+        _ = try? await client.registerPurchase(input)
+        _ = try? await client.registerPurchase(input)
+        let queuedCount = await client.pendingPurchaseCount()
+        XCTAssertEqual(queuedCount, 1)
+    }
+
+    func testDeliberatePurchaseRejectionIsNotQueued() async throws {
+        StubProtocol.respond(
+            containing: "/purchases", status: 409, body: #"{"error":"blocked"}"#)
+        let client = makeClient()
+        let input = RegisterPurchaseInput(
+            source: .apple, token: "orig.2", productId: "pro.monthly",
+            transactionId: "txn.2")
+        do {
+            _ = try await client.registerPurchase(input)
+            XCTFail("expected purchaseBlocked")
+        } catch let err as RevnixError {
+            XCTAssertFalse(err.isRetryable)
+        }
+        let queuedCount = await client.pendingPurchaseCount()
+        XCTAssertEqual(queuedCount, 0)
+    }
+
+    // MARK: - Cache fallback discipline (spec: "REV-198 cache fallback discipline")
+
+    func testRevokedKey401IsNotPaperedOverByTheCache() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.respond(
+            containing: "/entitlements", status: 401, body: #"{"error":"revoked"}"#)
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()  // cached
+        do {
+            _ = try await client.entitlements()
+            XCTFail("expected RevnixError.auth")
+        } catch let err as RevnixError {
+            XCTAssertEqual(err, .auth(401))
+            XCTAssertFalse(err.isRetryable)
+        }
+    }
+
+    func testUnknownPlacement404IsNotPaperedOverByTheCache() async throws {
+        StubProtocol.respondOnce(
+            containing: "/placements", status: 200, body: Self.placementBody)
+        StubProtocol.respond(
+            containing: "/placements", status: 404,
+            body: #"{"error":"unknown placement"}"#)
+        let client = makeClient()
+        _ = try await client.resolvePlacement("main")  // cached
+        do {
+            _ = try await client.resolvePlacement("main")
+            XCTFail("expected RevnixError.notFound")
+        } catch let err as RevnixError {
+            XCTAssertEqual(err, .notFound)
+            XCTAssertFalse(err.isRetryable)
+        }
+    }
+
+    func test500StillFallsBackToTheCache() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.respond(
+            containing: "/entitlements", status: 500, body: #"{"error":"boom"}"#)
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        let cached = try await client.entitlements()
+        XCTAssertEqual(cached.stale, true)
+        XCTAssertEqual(cached.entitlements.first?.isActive, true)
+    }
+
+    // MARK: - Offline cache age bound (spec: "REV-198 offline cache age bound")
+
+    func testCacheAgeCeilingServesInactive() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let clock = Clock(start: Date())
+        let client = makeClient(now: { clock.now() })
+        _ = try await client.entitlements()
+
+        // 15 days later, offline: past the 14-day ceiling → all inactive.
+        clock.advance(by: 15 * 24 * 3600)
+        StubProtocol.respond(containing: "/entitlements", status: 500, body: #"{"error":"down"}"#)
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, false)
+    }
+
+    func testWithinTheOfflineWindowItStillGrants() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let clock = Clock(start: Date())
+        let client = makeClient(now: { clock.now() })
+        _ = try await client.entitlements()
+
+        // 13 days later, offline: inside the 14-day ceiling → still granted.
+        clock.advance(by: 13 * 24 * 3600)
+        StubProtocol.respond(containing: "/entitlements", status: 500, body: #"{"error":"down"}"#)
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, true)
+    }
+
+    func testClockRollbackServesInactive() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let clock = Clock(start: Date())
+        let client = makeClient(now: { clock.now() })
+        _ = try await client.entitlements()
+
+        // Roll the clock back 30 minutes, go offline → all inactive.
+        clock.advance(by: -1800)
+        StubProtocol.respond(containing: "/entitlements", status: 500, body: #"{"error":"down"}"#)
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, false)
+    }
+
+    // MARK: - Soft TTL + coalescing (spec: "REV-199 entitlement read TTL")
+
+    func testReadsWithinTTLCostOneRequestAndConcurrentReadsShareOne() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient()
+
+        // Concurrent burst — a screen full of gates → one request.
+        async let a = client.isEntitled("pro")
+        async let b = client.isEntitled("pro")
+        async let c = client.entitlements()
+        _ = await a
+        _ = await b
+        _ = try await c
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/entitlements"), 1)
+
+        // Within the TTL → still one.
+        _ = try await client.entitlements()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/entitlements"), 1)
+    }
+
+    func testTTLZeroRestoresAlwaysFetch() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        _ = try await client.entitlements()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/entitlements"), 2)
+    }
+
+    /// Regression: `waitForEntitlements` must bypass the soft TTL. Polling
+    /// through the TTL re-read the SAME cached snapshot, so the cursor never
+    /// advanced and every post-purchase unlock spun until it gave up whenever
+    /// a gate had been checked in the preceding 30 s.
+    func testWaitForEntitlementsBypassesTheSoftTTL() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.respond(
+            containing: "/entitlements", status: 200,
+            body: """
+                {"customerId":"cust_1","cursor":9,"entitlements":[{"entitlementId":"pro","isActive":true,"expiresAt":4102444800000,"sources":[]}]}
+                """)
+        // Default 30 s TTL stays ON — that is the point of the regression.
+        let client = makeClient()
+        let first = try await client.entitlements()
+        XCTAssertEqual(first.cursor, 7)
+
+        let settled = try await client.waitForEntitlements(seq: 9)
+        XCTAssertEqual(settled.cursor, 9)
+        XCTAssertEqual(settled.stale, false)
+    }
+
+    /// The poll resolves with the LAST read rather than throwing when the
+    /// ledger never catches up — a slow ledger is "not unlocked yet", not an
+    /// error every caller has to handle.
+    func testWaitForEntitlementsReturnsLastReadWhenCursorNeverCatchesUp() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient(readYourWritesDelays: [0.01, 0.01])
+        let settled = try await client.waitForEntitlements(seq: 999)
+        XCTAssertEqual(settled.cursor, 7)  // never reached 999, still returned
+    }
+
+    // MARK: - Diagnostics (spec: "REV-200 diagnostics")
+
+    func testBackgroundFailureReachesDiagnosticsAndRidesTheNextRequestHeader() async throws {
+        let storage = MemoryStorage()
+        // A queued purchase from a "previous launch" whose retry will fail.
+        storage.set(
+            "revnix.pendingPurchases",
+            """
+            [{"key":"apple:otx-9:tx-9","source":"apple","token":"otx-9","productId":"pro.monthly","transactionId":"tx-9"}]
+            """)
+        StubProtocol.failWithConnectionError(containing: "/purchases")
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+
+        let events = Recorder()
+        let client = makeClient(
+            storage: storage, entitlementsTTL: 0,
+            onDiagnostic: { events.record($0.op) })
+
+        let delivered = await client.retryPendingPurchases()
+        XCTAssertEqual(delivered, 0)
+        XCTAssertGreaterThan(events.count, 0)
+        // Retryable failure → the item stays queued for the next launch.
+        let stillQueued = await client.pendingPurchaseCount()
+        XCTAssertEqual(stillQueued, 1)
+
+        // The counter rides the next successful request…
+        _ = try await client.entitlements()
+        let header = StubProtocol.lastHeader(
+            "X-Revnix-Bg-Failures", containing: "/entitlements")
+        XCTAssertNotNil(header)
+        XCTAssertGreaterThan(Int(header ?? "0") ?? 0, 0)
+
+        // …and is cleared once delivered.
+        _ = try await client.entitlements()
+        let cleared = StubProtocol.lastHeader(
+            "X-Revnix-Bg-Failures", containing: "/entitlements")
+        XCTAssertNil(cleared)
+    }
+
+    /// The JS spec asserts a throwing `onDiagnostic` cannot take the SDK down.
+    /// A Swift diagnostic closure is non-throwing, so that failure mode is
+    /// structurally impossible here; what remains testable is that installing
+    /// a handler never swallows or alters the error the caller sees.
+    func testDiagnosticHandlerNeverMasksTheUnderlyingError() async throws {
+        StubProtocol.failWithConnectionError(containing: "/entitlements")
+        let events = Recorder()
+        let client = makeClient(onDiagnostic: { events.record($0.op) })
+        do {
+            _ = try await client.entitlements()
+            XCTFail("expected RevnixError.network")
+        } catch let err as RevnixError {
+            guard case .network = err else {
+                return XCTFail("expected .network, got \(err)")
+            }
+        }
+    }
+}
+
+// MARK: - Test plumbing
+
+/// Mutable test clock, thread-safe.
+final class Clock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Date
+    init(start: Date) { self.current = start }
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+    func advance(by seconds: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        current = current.addingTimeInterval(seconds)
+    }
+}
+
+/// Thread-safe collector for diagnostic callbacks.
+final class Recorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ops: [String] = []
+    func record(_ op: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        ops.append(op)
+    }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return ops.count
+    }
+}
+
+/// URLProtocol stub: path-substring → canned response, connection error, or a
+/// deliberate hang. Records every request so tests can assert call counts and
+/// outbound headers.
+final class StubProtocol: URLProtocol {
+    struct Stub {
+        let status: Int
+        let body: String
+        let headers: [String: String]
+        let connectionError: Bool
+        let hang: Bool
+    }
+    struct Recorded {
+        let path: String
+        let headers: [String: String]
+        let body: String
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var stubs: [(substring: String, stub: Stub)] = []
+    /// One-shot stubs, matched before the persistent ones (mirrors the JS
+    /// spec's `mockResolvedValueOnce` sequencing).
+    nonisolated(unsafe) private static var onceStubs: [(substring: String, stub: Stub)] = []
+    nonisolated(unsafe) private static var recorded: [Recorded] = []
+
+    static func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        stubs = []
+        onceStubs = []
+        recorded = []
+    }
+
+    static func respond(
+        containing substring: String, status: Int, body: String,
+        headers: [String: String] = [:]
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        stubs.removeAll { $0.substring == substring }
+        stubs.append(
+            (substring,
+                Stub(
+                    status: status, body: body, headers: headers,
+                    connectionError: false, hang: false)))
+    }
+
+    static func respondOnce(containing substring: String, status: Int, body: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        onceStubs.append(
+            (substring,
+                Stub(
+                    status: status, body: body, headers: [:],
+                    connectionError: false, hang: false)))
+    }
+
+    static func failWithConnectionError(containing substring: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        stubs.removeAll { $0.substring == substring }
+        stubs.append(
+            (substring,
+                Stub(
+                    status: 0, body: "", headers: [:], connectionError: true,
+                    hang: false)))
+    }
+
+    /// Never responds — the request timeout is what ends it.
+    static func hang(containing substring: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        stubs.removeAll { $0.substring == substring }
+        stubs.append(
+            (substring,
+                Stub(
+                    status: 0, body: "", headers: [:], connectionError: false,
+                    hang: true)))
+    }
+
+    static func requestCount(containing substring: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.filter { $0.path.contains(substring) }.count
+    }
+
+    /// Header value on the most recent matching request (nil when absent).
+    static func lastHeader(_ name: String, containing substring: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.last { $0.path.contains(substring) }?.headers[name]
+    }
+
+    /// JSON body of the most recent matching request.
+    static func lastBody(containing substring: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.last { $0.path.contains(substring) }?.body
+    }
+
+    private static func record(path: String, headers: [String: String], body: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(Recorded(path: path, headers: headers, body: body))
+    }
+
+    /// URLSession hands URLProtocol an upload body as a stream, not
+    /// `httpBody` — read whichever is present.
+    private func capturedBody() -> String {
+        if let data = request.httpBody {
+            return String(decoding: data, as: UTF8.self)
+        }
+        guard let stream = request.httpBodyStream else { return "" }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let size = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: size)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: size)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func match(_ path: String) -> Stub? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let index = onceStubs.firstIndex(where: { path.contains($0.substring) }) {
+            return onceStubs.remove(at: index).stub
+        }
+        return stubs.first { path.contains($0.substring) }?.stub
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        Self.record(
+            path: path, headers: request.allHTTPHeaderFields ?? [:],
+            body: capturedBody())
+        guard let stub = Self.match(path) else {
+            client?.urlProtocol(
+                self,
+                didReceive: HTTPURLResponse(
+                    url: request.url!, statusCode: 404, httpVersion: nil,
+                    headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"error":"no stub"}"#.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        if stub.hang { return }
+        if stub.connectionError {
+            client?.urlProtocol(
+                self, didFailWithError: URLError(.notConnectedToInternet))
+            return
+        }
+        var headerFields = stub.headers
+        headerFields["Content-Type"] = "application/json"
+        client?.urlProtocol(
+            self,
+            didReceive: HTTPURLResponse(
+                url: request.url!, statusCode: stub.status, httpVersion: nil,
+                headerFields: headerFields)!,
+            cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(stub.body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
