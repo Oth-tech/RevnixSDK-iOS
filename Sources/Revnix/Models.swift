@@ -138,12 +138,83 @@ public struct PlacementOffering: Codable, Sendable, Equatable {
     public let packages: [PlacementPackage]
 }
 
+// REV-028: remote paywall design attached to a placement. Render contract —
+// the app draws this with its own components; prices still come from the
+// store (StoreKit) so the display never disagrees with the charge.
+
+/// One row in the paywall's feature list.
+public struct PaywallFeature: Codable, Sendable, Equatable {
+    public let icon: String?
+    public let title: String
+    public let description: String?
+}
+
+/// Social proof, dashboard-configured. Any layout renders the pieces that
+/// are set: stars/quote card above the packages, `count` under the CTA.
+public struct PaywallReview: Codable, Sendable, Equatable {
+    /// 0–5; rendered as a star row.
+    public let rating: Double?
+    public let quote: String?
+    public let author: String?
+    /// e.g. "Join 2M+ users" — small line under the CTA.
+    public let count: String?
+}
+
+/// Win-back/offer presentation: anchor price struck through on the
+/// highlighted package, urgency line above the CTA. Any layout.
+public struct PaywallOffer: Codable, Sendable, Equatable {
+    public let strikethroughPrice: String?
+    public let urgencyText: String?
+}
+
+/// Footer links, dashboard-configured. When a URL is set the SDK opens it
+/// directly; otherwise the host app's terms/privacy handler runs.
+public struct PaywallFooter: Codable, Sendable, Equatable {
+    public let showRestore: Bool
+    public let showTerms: Bool
+    public let showPrivacy: Bool
+    public let termsUrl: String?
+    public let privacyUrl: String?
+}
+
+public struct PaywallConfig: Codable, Sendable, Equatable {
+    /// Layout — the screen structure the paywall renders. Known values:
+    /// "focus", "feature-list", "minimal", "hero", "timeline", "plans",
+    /// "feature-grid", "offer", "reveal". Kept as a String so configs
+    /// published with future layouts never fail decoding.
+    public let template: String
+    /// "dark" or "light". Absent (legacy config) = dark.
+    public let mode: String?
+    public let headline: String
+    public let subheadline: String?
+    public let features: [PaywallFeature]
+    public let ctaLabel: String
+    /// packageId of the visually highlighted package.
+    public let highlightPackageId: String?
+    /// Badge on the highlighted package, e.g. "SAVE 17%".
+    public let badgeText: String?
+    /// Accent hex like "#6478ff"; fall back to the app theme when absent.
+    public let accent: String?
+    /// Hero image URL rendered above the headline in place of the icon tile.
+    public let heroImageUrl: String?
+    public let review: PaywallReview?
+    public let offer: PaywallOffer?
+    /// Absent (legacy config) = show all three footer links.
+    public let footer: PaywallFooter?
+}
+
+public struct PlacementPaywall: Codable, Sendable, Equatable {
+    public let paywallId: String
+    public let name: String
+    public let config: PaywallConfig
+}
+
 public struct PlacementResolution: Codable, Sendable, Equatable {
     public let status: String
     public let placementKey: String
     /// Published catalog revision this resolution came from.
     public let revision: Int
     public let offering: PlacementOffering
-    /// Remote paywall render contract (see docs) — app-rendered in v1.
-    public let paywall: JSONValue?
+    /// Remote paywall render contract — app-rendered from `config`.
+    public let paywall: PlacementPaywall?
 }

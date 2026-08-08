@@ -444,6 +444,62 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertEqual(settled.cursor, 7)  // never reached 999, still returned
     }
 
+    // MARK: - Paywall config decoding (spec: react `PaywallConfig` templates)
+
+    /// A template-gallery config exercising every new field: a post-expansion
+    /// layout ("offer"), light mode, review + offer blocks, footer URLs — and
+    /// an unknown key, which Codable must ignore.
+    func testPaywallFullTemplateConfigDecodes() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 200,
+            body: """
+                {"status":"ok","placementKey":"main","revision":3,"offering":{"offeringId":"off_1","displayName":"Default","packages":[{"packageId":"pkg_1","productId":"pro.monthly"}]},"paywall":{"paywallId":"pw_1","name":"Winback","config":{"template":"offer","mode":"light","headline":"Come back","subheadline":"We missed you","features":[{"icon":"star","title":"Everything","description":"All features"}],"ctaLabel":"Claim offer","highlightPackageId":"pkg_1","badgeText":"SAVE 17%","accent":"#6478ff","heroImageUrl":"https://cdn.example/hero.png","review":{"rating":4.8,"quote":"Life-changing","author":"Sam","count":"Join 2M+ users"},"offer":{"strikethroughPrice":"$9.99","urgencyText":"Ends tonight"},"footer":{"showRestore":true,"showTerms":true,"showPrivacy":false,"termsUrl":"https://example.com/terms"},"someFutureField":{"nested":true}}}}
+                """)
+        let client = makeClient()
+        let resolution = try await client.resolvePlacement("main")
+        let paywall = try XCTUnwrap(resolution.paywall)
+        XCTAssertEqual(paywall.paywallId, "pw_1")
+        XCTAssertEqual(paywall.name, "Winback")
+        XCTAssertEqual(paywall.config.template, "offer")
+        XCTAssertEqual(paywall.config.mode, "light")
+        XCTAssertEqual(paywall.config.headline, "Come back")
+        XCTAssertEqual(paywall.config.features.first?.icon, "star")
+        XCTAssertEqual(paywall.config.review?.rating, 4.8)
+        XCTAssertEqual(paywall.config.review?.count, "Join 2M+ users")
+        XCTAssertEqual(paywall.config.offer?.strikethroughPrice, "$9.99")
+        XCTAssertEqual(paywall.config.offer?.urgencyText, "Ends tonight")
+        XCTAssertEqual(paywall.config.footer?.showPrivacy, false)
+        XCTAssertEqual(paywall.config.footer?.termsUrl, "https://example.com/terms")
+        XCTAssertNil(paywall.config.footer?.privacyUrl)
+    }
+
+    /// A pre-expansion config (original "focus" template, no mode/review/
+    /// offer/footer) must keep decoding — and a resolution with no paywall
+    /// at all still decodes with `paywall == nil`.
+    func testLegacyMinimalPaywallConfigStillDecodes() async throws {
+        StubProtocol.respondOnce(
+            containing: "/placements", status: 200,
+            body: """
+                {"status":"ok","placementKey":"main","revision":1,"offering":{"offeringId":"off_1","displayName":"Default","packages":[{"packageId":"pkg_1","productId":"pro.monthly"}]},"paywall":{"paywallId":"pw_0","name":"Legacy","config":{"template":"focus","headline":"Go Pro","features":[{"title":"Unlimited"}],"ctaLabel":"Subscribe"}}}
+                """)
+        StubProtocol.respond(containing: "/placements", status: 200, body: Self.placementBody)
+        let client = makeClient()
+        let legacy = try await client.resolvePlacement("main")
+        let paywall = try XCTUnwrap(legacy.paywall)
+        XCTAssertEqual(paywall.config.template, "focus")
+        XCTAssertNil(paywall.config.mode)
+        XCTAssertEqual(paywall.config.features, [
+            PaywallFeature(icon: nil, title: "Unlimited", description: nil)
+        ])
+        XCTAssertNil(paywall.config.review)
+        XCTAssertNil(paywall.config.offer)
+        XCTAssertNil(paywall.config.footer)
+
+        // Fixture without a `paywall` key at all.
+        let bare = try await client.resolvePlacement("main")
+        XCTAssertNil(bare.paywall)
+    }
+
     // MARK: - Diagnostics (spec: "REV-200 diagnostics")
 
     func testBackgroundFailureReachesDiagnosticsAndRidesTheNextRequestHeader() async throws {
