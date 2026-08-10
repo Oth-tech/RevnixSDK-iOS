@@ -500,6 +500,59 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertNil(bare.paywall)
     }
 
+    // MARK: - Experiments (spec: "REV-219 A/B experiments")
+
+    static let experimentPlacementBody = """
+        {"status":"ok","placementKey":"main","revision":4,"offering":{"offeringId":"off_2","displayName":"Variant B","packages":[{"packageId":"pkg_2","productId":"pro.annual"}]},"experiment":{"key":"summer-pricing","variantId":"var_b"}}
+        """
+
+    /// The resolve carries the customer id (URL-encoded) so the server can
+    /// pin a sticky variant, and the assignment decodes off the response.
+    func testResolveSendsCustomerIdAndDecodesExperiment() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.experimentPlacementBody)
+        let storage = MemoryStorage()
+        // An id with a space proves the query item is percent-encoded.
+        storage.set("revnix.customerId", "cust one")
+        let client = makeClient(storage: storage)
+        let resolution = try await client.resolvePlacement("main")
+        XCTAssertEqual(
+            resolution.experiment,
+            PlacementExperiment(key: "summer-pricing", variantId: "var_b"))
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/placements"))
+        XCTAssertTrue(path.hasSuffix("/offering?customer=cust%20one"), path)
+    }
+
+    /// `experiment` is null when nothing is running, and absent entirely on
+    /// older servers — both must decode to nil.
+    func testExperimentNullAndAbsentBothDecodeToNil() async throws {
+        StubProtocol.respondOnce(
+            containing: "/placements", status: 200,
+            body: """
+                {"status":"ok","placementKey":"main","revision":1,"offering":{"offeringId":"off_1","displayName":"Default","packages":[]},"experiment":null}
+                """)
+        StubProtocol.respond(containing: "/placements", status: 200, body: Self.placementBody)
+        let client = makeClient()
+        let nullCase = try await client.resolvePlacement("main")
+        XCTAssertNil(nullCase.experiment)
+        let absentCase = try await client.resolvePlacement("main")
+        XCTAssertNil(absentCase.experiment)
+    }
+
+    /// The assignment must survive the offline fallback — attribution from a
+    /// cached resolution has to name the same variant that was served.
+    func testExperimentRoundTripsThroughThePlacementCache() async throws {
+        StubProtocol.respondOnce(
+            containing: "/placements", status: 200, body: Self.experimentPlacementBody)
+        StubProtocol.failWithConnectionError(containing: "/placements")
+        let client = makeClient()
+        _ = try await client.resolvePlacement("main")  // cached
+        let cached = try await client.resolvePlacement("main")
+        XCTAssertEqual(
+            cached.experiment,
+            PlacementExperiment(key: "summer-pricing", variantId: "var_b"))
+    }
+
     // MARK: - Diagnostics (spec: "REV-200 diagnostics")
 
     func testBackgroundFailureReachesDiagnosticsAndRidesTheNextRequestHeader() async throws {
@@ -685,6 +738,13 @@ final class StubProtocol: URLProtocol {
         return recorded.last { $0.path.contains(substring) }?.headers[name]
     }
 
+    /// Path+query of the most recent matching request.
+    static func lastPath(containing substring: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.last { $0.path.contains(substring) }?.path
+    }
+
     /// JSON body of the most recent matching request.
     static func lastBody(containing substring: String) -> String? {
         lock.lock()
@@ -735,8 +795,11 @@ final class StubProtocol: URLProtocol {
 
     override func startLoading() {
         let path = request.url?.path ?? ""
+        // Recorded WITH the query string so tests can assert query items;
+        // stub matching stays on the bare path.
+        let pathAndQuery = (request.url?.query).map { "\(path)?\($0)" } ?? path
         Self.record(
-            path: path, headers: request.allHTTPHeaderFields ?? [:],
+            path: pathAndQuery, headers: request.allHTTPHeaderFields ?? [:],
             body: capturedBody())
         guard let stub = Self.match(path) else {
             client?.urlProtocol(
