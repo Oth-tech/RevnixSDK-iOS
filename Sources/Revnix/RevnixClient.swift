@@ -266,8 +266,11 @@ public actor RevnixClient {
 
     public func resolvePlacement(_ key: String) async throws -> PlacementResolution {
         do {
+            // REV-219: the customer id lets the server pin a sticky experiment
+            // variant; older servers simply ignore the parameter.
             let data = try await request(
-                path: "/v1/placements/\(encode(key))/offering", method: "GET")
+                path: "/v1/placements/\(encode(key))/offering", method: "GET",
+                query: [URLQueryItem(name: "customer", value: customerId())])
             let resolution = try decode(PlacementResolution.self, from: data)
             if let encoded = try? String(
                 data: JSONEncoder().encode(resolution), encoding: .utf8)
@@ -323,14 +326,38 @@ public actor RevnixClient {
         }
     }
 
+    /// Set attributes on the current customer (REV-033 v2). Attributes are
+    /// what A/B-test audiences target — set `country`, `app_version`,
+    /// `locale`, or any custom key you want to segment on. A `.null` value
+    /// deletes the key.
+    ///
+    /// Throws, unlike the fire-and-forget beacons: the next placement resolve
+    /// may depend on these, so a silent failure would look like broken
+    /// targeting. `email` and `username` are reserved (secret key only), and
+    /// an attribute your backend already set cannot be changed from a device.
+    public func setAttributes(_ attributes: [String: JSONValue]) async throws {
+        _ = try await request(
+            path: "/v1/customers/\(encode(customerId()))/attributes",
+            method: "POST",
+            body: ["attributes": .object(attributes)])
+    }
+
     // MARK: - Transport
 
-    public static let sdkVersion = "0.1.0"
+    public static let sdkVersion = "0.2.0"
 
     private func request(
-        path: String, method: String, body: [String: JSONValue]? = nil
+        path: String, method: String, query: [URLQueryItem]? = nil,
+        body: [String: JSONValue]? = nil
     ) async throws -> Data {
-        var req = URLRequest(url: config.baseURL.appendingPathComponent(path))
+        var url = config.baseURL.appendingPathComponent(path)
+        if let query,
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        {
+            components.queryItems = query
+            url = components.url ?? url
+        }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         req.timeoutInterval = config.timeout
         req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")

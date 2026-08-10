@@ -18,13 +18,13 @@ Requires iOS 16+ / macOS 13+ / tvOS 16+ / watchOS 9+ and Swift 5.9.
 **Swift Package Manager**
 
 ```swift
-.package(url: "https://github.com/Oth-tech/revnix-swift.git", from: "0.1.0")
+.package(url: "https://github.com/Oth-tech/revnix-swift.git", from: "0.2.0")
 ```
 
 **CocoaPods**
 
 ```ruby
-pod 'Revnix', '~> 0.1'
+pod 'Revnix', '~> 0.2'
 ```
 
 ## Quick start
@@ -84,7 +84,7 @@ the ledger never catches up.
 swift test
 ```
 
-27 unit tests cover the full resilience matrix against a `URLProtocol` stub.
+32 unit tests cover the full resilience matrix against a `URLProtocol` stub.
 
 The four store-glue tests in `StoreKitIntegrationTests` drive a real StoreKit 2
 purchase through `SKTestSession` against `Tests/RevnixTests/Resources/Revnix.storekit`.
