@@ -1,6 +1,6 @@
 # Revnix Swift SDK
 
-Native Swift SDK for [Revnix](https://revnix.com) — StoreKit 2 purchase glue plus
+Native Swift SDK for [Revnix](https://revnix.io) — StoreKit 2 purchase glue plus
 the same resilience policy as `revnix-react`.
 
 - **StoreKit 2 native.** One call from tap to unlocked gate, with the JWS as
@@ -107,6 +107,33 @@ first resolve on a covered placement — eligibility is checked at that resolve.
 attribute your backend already set cannot be changed from a device; both
 reject the whole batch rather than applying part of it.
 
+## API surface
+
+Beyond the calls shown above:
+
+| API | What it does |
+|---|---|
+| `RevnixStoreKit.restore(client:) async -> Int` | Re-registers everything in `Transaction.currentEntitlements` (wire it to a "Restore purchases" button). The server dedupes on the shared purchase key, so it is always safe; returns the number registered. |
+| `client.customerId() -> String` | Current customer id — an `rvx_anon_…` id is minted (and persisted) on first call. |
+| `client.logout() -> String` | Mints a fresh anonymous customer locally and returns it. Call at sign-out, or the next user inherits the previous one's cached entitlements. |
+| `client.cachedEntitlements() -> CustomerEntitlements?` | Last cached snapshot with the offline policy applied, no network; `nil` when the customer has never had a live read. |
+| `client.logPaywallShown(placementKey:paywallId:) async` | Fire-and-forget impression beacon (feeds funnels and view conversions); failures go to `onDiagnostic`, never thrown. |
+| `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
+
+### `RevnixConfig` knobs
+
+Everything but `apiKey` and `baseURL` has a default:
+
+| Knob | Default | What it does |
+|---|---|---|
+| `storage` | `FileStorage()` | Persistence adapter (`RevnixStorage` protocol). `FileStorage` writes to Application Support; `MemoryStorage` is provided for tests / ephemeral use. |
+| `timeout` | `10` s | Per-request timeout. |
+| `offlineMaxCacheAge` | 14 days | Cache-served snapshots older than this serve every entitlement as inactive. |
+| `entitlementsTTL` | `30` s | Soft TTL on entitlement reads — a snapshot this fresh answers without a network round trip. `0` restores always-fetch. |
+| `readYourWritesDelays` | `[0.25, 0.5, 1, 2]` | Post-purchase entitlement poll schedule in seconds, jittered ±20%; empty disables polling. |
+| `onDiagnostic` | — | Callback for swallowed background failures. |
+| `now` / `session` | — | Injectable clock and `URLSession` for tests. |
+
 ## Resilience policy
 
 This is a product contract, not an implementation detail. `revnix-react`'s
@@ -156,6 +183,6 @@ the full purchase → register → unlock path.
 **Not yet published.** The Swift Package Manager and CocoaPods coordinates
 above are the intended ones, but neither the repository nor the pod is public
 yet, so `swift package resolve` / `pod install` will not find them. Until they
-ship, apps integrate over the [REST API](https://revnix.com/docs/ios) — the
+ship, apps integrate over the [REST API](https://revnix.io/docs/ios) — the
 same `/v1` contract this SDK speaks, so migrating later does not change the
 backend integration.
