@@ -1,0 +1,1102 @@
+// RevnixPaywallView — renders a published PaywallConfig exactly as the
+// dashboard paywall-builder previews it (PaywallPhonePreview.tsx in
+// revnix-app is the reference renderer; revnix-sdk's RevnixPaywall.tsx is
+// the same contract ported to React Native — keep all three in lockstep).
+// The config decides template, copy, accent, badge, highlight, and hero
+// image; the app supplies package titles/prices (from StoreKit) and the
+// purchase handlers, so the display never disagrees with the charge.
+//
+// `template` is a LAYOUT id. "focus" | "feature-list" | "minimal" are the
+// original three; the newer layouts (hero, timeline, plans, feature-grid,
+// offer, reveal) are distinct screen structures the dashboard's template
+// gallery presets over. An unrecognized template (config published by a
+// newer dashboard) falls back to the classic structure instead of rendering
+// nothing.
+//
+// Point values are the RN renderer's stylesheet values verbatim (they are
+// the native-device reference proportions). RN `lineHeight` has no direct
+// SwiftUI equivalent — it maps to `lineSpacing` on top of the system's
+// ~1.2× default line box. Like the RN renderer, empty strings in the config
+// are treated the same as absent fields.
+
+#if canImport(SwiftUI)
+import SwiftUI
+
+// MARK: - Public surface
+
+/// One purchasable row. `priceLabel` must come from the store (localized).
+public struct RevnixPaywallPackage: Identifiable, Sendable, Equatable {
+    public let packageId: String
+    public let title: String
+    public let priceLabel: String
+
+    public var id: String { packageId }
+
+    public init(packageId: String, title: String, priceLabel: String) {
+        self.packageId = packageId
+        self.title = title
+        self.priceLabel = priceLabel
+    }
+}
+
+/// Colors the paywall renders with. Defaults mirror the dashboard preview
+/// chrome (a fixed dark screen) — override to match the host app's theme.
+public struct RevnixPaywallTheme: Equatable {
+    public var background: Color
+    public var textPrimary: Color
+    public var textSecondary: Color
+    public var textFaint: Color
+    public var border: Color
+    /// Text color on accent-filled surfaces (CTA, badge).
+    public var accentInk: Color
+
+    public init(
+        background: Color, textPrimary: Color, textSecondary: Color,
+        textFaint: Color, border: Color, accentInk: Color
+    ) {
+        self.background = background
+        self.textPrimary = textPrimary
+        self.textSecondary = textSecondary
+        self.textFaint = textFaint
+        self.border = border
+        self.accentInk = accentInk
+    }
+
+    /// Base theme for dark configs (and legacy configs without `mode`).
+    public static let dark = RevnixPaywallTheme(
+        background: rgb(0x0f1116), textPrimary: rgb(0xffffff),
+        textSecondary: rgb(0x9aa0a8), textFaint: rgb(0x6b7078),
+        border: rgb(0x2a2e36), accentInk: rgb(0x0a0b0d))
+
+    /// Base theme when the dashboard config sets `mode: "light"`. Keep in
+    /// lockstep with the builder preview (PaywallPhonePreview SCREEN_PALETTES).
+    public static let light = RevnixPaywallTheme(
+        background: rgb(0xffffff), textPrimary: rgb(0x16181d),
+        textSecondary: rgb(0x5b6068), textFaint: rgb(0x9aa0a8),
+        border: rgb(0xe2e5ea), accentInk: rgb(0xffffff))
+
+    /// Partial override (the RN renderer's `Partial<RevnixPaywallTheme>`):
+    /// nil fields keep the config-selected base palette.
+    public struct Override: Equatable {
+        public var background: Color?
+        public var textPrimary: Color?
+        public var textSecondary: Color?
+        public var textFaint: Color?
+        public var border: Color?
+        public var accentInk: Color?
+
+        public init(
+            background: Color? = nil, textPrimary: Color? = nil,
+            textSecondary: Color? = nil, textFaint: Color? = nil,
+            border: Color? = nil, accentInk: Color? = nil
+        ) {
+            self.background = background
+            self.textPrimary = textPrimary
+            self.textSecondary = textSecondary
+            self.textFaint = textFaint
+            self.border = border
+            self.accentInk = accentInk
+        }
+    }
+
+    func applying(_ override: Override?) -> RevnixPaywallTheme {
+        guard let o = override else { return self }
+        var t = self
+        if let v = o.background { t.background = v }
+        if let v = o.textPrimary { t.textPrimary = v }
+        if let v = o.textSecondary { t.textSecondary = v }
+        if let v = o.textFaint { t.textFaint = v }
+        if let v = o.border { t.border = v }
+        if let v = o.accentInk { t.accentInk = v }
+        return t
+    }
+}
+
+/// What the view needs for the paywall.viewed report (REV-094) — the
+/// analytics funnel's "Paywall displayed" stage. A protocol rather than
+/// `RevnixClient` keeps this entrypoint decoupled from the client type,
+/// the way the RN renderer's structurally-typed `client` prop does.
+public protocol RevnixPaywallViewReporting: Sendable {
+    func logPaywallShown(placementKey: String?, paywallId: String?) async
+}
+
+extension RevnixClient: RevnixPaywallViewReporting {}
+
+// MARK: - View
+
+public struct RevnixPaywallView: View {
+    private let config: PaywallConfig
+    private let packages: [RevnixPaywallPackage]
+    /// Called with the selected packageId when the CTA is pressed.
+    private let onPurchase: (String) -> Void
+    private let selectedPackageId: String?
+    private let onSelectPackage: ((String) -> Void)?
+    /// Renders a spinner in the CTA and disables purchasing.
+    private let loading: Bool
+    private let onRestore: (() -> Void)?
+    private let onTerms: (() -> Void)?
+    private let onPrivacy: (() -> Void)?
+    private let themeOverride: RevnixPaywallTheme.Override?
+    private let client: (any RevnixPaywallViewReporting)?
+    private let placementKey: String?
+    private let paywallId: String?
+    private let disableViewTracking: Bool
+
+    @State private var internalSelected: String?
+    @State private var didReportView = false
+    @Environment(\.openURL) private var openURL
+
+    /// - Parameters:
+    ///   - selectedPackageId: Controlled selection; omit to let the paywall
+    ///     manage it (initial selection is the config's highlight package,
+    ///     else the first package).
+    ///   - client: When given, the paywall reports one paywall.viewed per
+    ///     appearance (REV-094); `placementKey`/`paywallId` are the
+    ///     attribution attached to the report, and `disableViewTracking`
+    ///     opts out while still passing `client`.
+    public init(
+        config: PaywallConfig,
+        packages: [RevnixPaywallPackage],
+        onPurchase: @escaping (String) -> Void,
+        selectedPackageId: String? = nil,
+        onSelectPackage: ((String) -> Void)? = nil,
+        loading: Bool = false,
+        onRestore: (() -> Void)? = nil,
+        onTerms: (() -> Void)? = nil,
+        onPrivacy: (() -> Void)? = nil,
+        theme: RevnixPaywallTheme.Override? = nil,
+        client: (any RevnixPaywallViewReporting)? = nil,
+        placementKey: String? = nil,
+        paywallId: String? = nil,
+        disableViewTracking: Bool = false
+    ) {
+        self.config = config
+        self.packages = packages
+        self.onPurchase = onPurchase
+        self.selectedPackageId = selectedPackageId
+        self.onSelectPackage = onSelectPackage
+        self.loading = loading
+        self.onRestore = onRestore
+        self.onTerms = onTerms
+        self.onPrivacy = onPrivacy
+        self.themeOverride = theme
+        self.client = client
+        self.placementKey = placementKey
+        self.paywallId = paywallId
+        self.disableViewTracking = disableViewTracking
+    }
+
+    // MARK: Resolved config
+
+    // Currency symbols the anchor-price guard recognizes (majors; a
+    // symbol-less anchor can't be judged and renders as entered).
+    private static let currencySymbols: Set<Character> = [
+        "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₫", "₪", "฿", "₴", "₦", "₱",
+    ]
+
+    private static let defaultAccent = rgb(0x6478ff)
+
+    // Base scheme comes from the dashboard config (mode: dark|light, absent
+    // = dark for legacy configs); the host app's explicit theme wins on top.
+    private var theme: RevnixPaywallTheme {
+        (config.mode == "light" ? RevnixPaywallTheme.light : .dark)
+            .applying(themeOverride)
+    }
+
+    private var accent: Color {
+        present(config.accent).flatMap(Color.init(revnixHex:)) ?? Self.defaultAccent
+    }
+
+    /// `${accent}26` in the RN renderer — 15% alpha tile/chip fill.
+    private var accentSoft: Color { accent.opacity(Double(0x26) / 255) }
+    /// `${accent}40` — 25% alpha rail/dot tint.
+    private var accentTint: Color { accent.opacity(Double(0x40) / 255) }
+
+    // Soft card surface used by the feature-grid / reveal / review blocks.
+    // Not part of the public theme — derived from the config's mode, in
+    // lockstep with the dashboard preview's SCREEN_PALETTES.card.
+    private var cardBg: Color {
+        config.mode == "light" ? rgb(0xf4f5f7) : rgb(0x181b22)
+    }
+
+    private var heroURL: URL? {
+        present(config.heroImageUrl).flatMap(URL.init(string:))
+    }
+
+    // Same template semantics as the dashboard preview: "minimal" shows only
+    // the highlighted package; feature bullets render on the feature layouts.
+    private var shown: [RevnixPaywallPackage] {
+        if config.template == "minimal",
+            let highlight = present(config.highlightPackageId)
+        {
+            return packages.filter { $0.packageId == highlight }
+        }
+        return packages
+    }
+
+    private var selectedId: String? {
+        if let controlled = selectedPackageId { return controlled }
+        if let internalSelected,
+            shown.contains(where: { $0.packageId == internalSelected })
+        {
+            return internalSelected
+        }
+        return shown.first { $0.packageId == config.highlightPackageId }?
+            .packageId ?? shown.first?.packageId
+    }
+
+    private func select(_ packageId: String) {
+        internalSelected = packageId
+        onSelectPackage?(packageId)
+    }
+
+    // The anchor is dashboard free text while priceLabel is the store's
+    // localized price — never pair them when their currency symbols disagree,
+    // or a EUR customer would see a struck-through USD anchor next to the
+    // real charge (this file's "display never disagrees with the charge"
+    // rule; kept in lockstep with the preview's anchorPriceFor). Symbol-less
+    // anchors can't be judged and pass through.
+    private func anchorPrice(for priceLabel: String) -> String? {
+        guard let anchor = present(config.offer?.strikethroughPrice) else {
+            return nil
+        }
+        guard let symbol = anchor.first(where: { Self.currencySymbols.contains($0) })
+        else { return anchor }
+        return priceLabel.contains(symbol) ? anchor : nil
+    }
+
+    // MARK: Body
+
+    // Responsive rules (mirroring the RN renderer's scrollContent/content):
+    //  · the column sits vertically centered on tall screens (no dead bottom
+    //    half) and scrolls normally when it overflows;
+    //  · on tablets/wide screens the column stays a readable width (max 440),
+    //    horizontally centered, instead of stretching edge to edge.
+    public var body: some View {
+        GeometryReader { geo in
+            let contentWidth = min(440, max(0, geo.size.width - 48))
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    layoutBody(contentWidth: contentWidth)
+                }
+                .frame(width: contentWidth)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 28)
+                .padding(.bottom, 32)
+                .frame(minHeight: geo.size.height)
+            }
+        }
+        .background(theme.background.ignoresSafeArea())
+        .onAppear {
+            // One view per appearance of this view identity: a re-presented
+            // paywall (new sheet / new identity) is a genuine new display;
+            // re-renders and navigation round-trips are not — the RN
+            // renderer's one-report-per-mount rule.
+            guard let client, !disableViewTracking, !didReportView else { return }
+            didReportView = true
+            let placementKey = placementKey
+            let paywallId = paywallId
+            Task {
+                await client.logPaywallShown(
+                    placementKey: placementKey, paywallId: paywallId)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func layoutBody(contentWidth: CGFloat) -> some View {
+        switch config.template {
+        case "hero":
+            heroBanner
+            featureChecks
+            reviewCard
+            packageRows(shown, withBadge: true, contentWidth: contentWidth)
+            tail(contentWidth: contentWidth)
+        case "timeline":
+            heroOrIcon
+            headlineBlock
+            timelineBlock
+            reviewCard
+            packageRows(shown, withBadge: true, contentWidth: contentWidth)
+            tail(contentWidth: contentWidth)
+        case "plans":
+            heroOrIcon
+            headlineBlock
+            // Columns stay readable up to 3 — beyond that the layout falls
+            // back to stacked rows (never drop a purchasable package), same
+            // rule as the dashboard preview.
+            if shown.count <= 3 {
+                planColumns
+            } else {
+                packageRows(shown, withBadge: true, contentWidth: contentWidth)
+            }
+            featureChecks
+            reviewCard
+            tail(contentWidth: contentWidth)
+        case "feature-grid":
+            heroOrIcon
+            headlineBlock
+            featureGrid
+            reviewCard
+            packageRows(shown, withBadge: true, contentWidth: contentWidth)
+            tail(contentWidth: contentWidth)
+        case "offer":
+            heroOrIcon
+            offerPill(contentWidth: contentWidth)
+            headlineBlock
+            offerSpotlight(contentWidth: contentWidth)
+            reviewCard
+            tail(contentWidth: contentWidth)
+        case "reveal":
+            progressDots
+            heroOrIcon
+            headlineBlock
+            revealCards
+            packageRows(shown, withBadge: true, contentWidth: contentWidth)
+            tail(contentWidth: contentWidth)
+        default:
+            // focus | feature-list | minimal — the original structure,
+            // unchanged for legacy configs (review/offer blocks only exist
+            // when configured).
+            heroOrIcon
+            headlineBlock
+            if config.template == "feature-list" { featureBullets }
+            reviewCard
+            packageRows(shown, withBadge: true, contentWidth: contentWidth)
+            tail(contentWidth: contentWidth)
+        }
+    }
+
+    /// Tail shared by every layout: urgency → CTA → count → footer.
+    @ViewBuilder
+    private func tail(contentWidth: CGFloat) -> some View {
+        urgencyLine
+        cta
+        countLine
+        footerBlock
+    }
+
+    // MARK: Shared blocks (each layout composes a subset; keep every block
+    // in lockstep with the same-named block in RevnixPaywall.tsx /
+    // PaywallPhonePreview.tsx)
+
+    /// Classic header: hero image card (or accent icon tile) + the centered
+    /// headline/subheadline below it.
+    @ViewBuilder
+    private var heroOrIcon: some View {
+        if present(config.heroImageUrl) != nil {
+            coverImage(heroURL)
+                .frame(height: 180)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .padding(.top, 8)
+                .padding(.bottom, 22)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(accentSoft)
+                    .frame(width: 64, height: 64)
+                Text("◆")
+                    .font(.system(size: 27))
+                    .foregroundStyle(accent)
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 22)
+        }
+    }
+
+    @ViewBuilder
+    private var headlineBlock: some View {
+        Text(config.headline)
+            .rnType(26, .heavy)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .foregroundStyle(theme.textPrimary)
+            .padding(.bottom, 10)
+        if let sub = present(config.subheadline) {
+            Text(sub)
+                .rnType(15, lineHeight: 21)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(theme.textSecondary)
+                .padding(.bottom, 26)
+        }
+    }
+
+    /// Hero layout banner: full-width media with a content-safe scrim
+    /// overlay carrying the headline/subheadline (always light-on-scrim).
+    /// Falls back to an accent field with the brand glyph when no hero
+    /// image is set.
+    private var heroBanner: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(config.headline)
+                    .rnType(24, .heavy)
+                    .foregroundStyle(Color.white)
+                if let sub = present(config.subheadline) {
+                    Text(sub)
+                        .rnType(13.5, lineHeight: 19)
+                        .foregroundStyle(Color.white.opacity(0.85))
+                        .padding(.top, 4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .background(Color.black.opacity(0.45))
+        }
+        .frame(maxWidth: .infinity, minHeight: 260)
+        .background {
+            if present(config.heroImageUrl) != nil {
+                coverImage(heroURL)
+            } else {
+                ZStack {
+                    accent
+                    Text("◆")
+                        .font(.system(size: 64))
+                        .foregroundStyle(Color.white.opacity(0.35))
+                        .padding(.bottom, 72)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .padding(.top, 8)
+        .padding(.bottom, 22)
+    }
+
+    /// Legacy feature bullets (feature-list layout).
+    @ViewBuilder
+    private var featureBullets: some View {
+        if !config.features.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(config.features.enumerated()), id: \.offset) { _, f in
+                    HStack(alignment: .top, spacing: 12) {
+                        Text(present(f.icon) ?? "✓")
+                            .rnType(15, lineHeight: 21)
+                            .foregroundStyle(accent)
+                            .frame(width: 24, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(f.title)
+                                .rnType(15.5, .semibold, lineHeight: 21)
+                                .foregroundStyle(theme.textPrimary)
+                            if let desc = present(f.description) {
+                                Text(desc)
+                                    .rnType(13, lineHeight: 18)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .padding(.top, 1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(.bottom, 26)
+        }
+    }
+
+    /// Compact single-line checks (hero banner body, plans checklist).
+    @ViewBuilder
+    private var featureChecks: some View {
+        if !config.features.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(config.features.enumerated()), id: \.offset) { _, f in
+                    HStack(alignment: .center, spacing: 10) {
+                        Text(present(f.icon) ?? "✓")
+                            .rnType(14)
+                            .foregroundStyle(accent)
+                            .frame(width: 20, alignment: .leading)
+                        Text(f.title)
+                            .rnType(14.5, .medium, lineHeight: 20)
+                            .foregroundStyle(theme.textPrimary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+    }
+
+    /// Trial timeline: icon dots joined by an accent rail; the first step is
+    /// filled solid ("you are here"), later steps are tinted.
+    @ViewBuilder
+    private var timelineBlock: some View {
+        if !config.features.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(config.features.enumerated()), id: \.offset) { i, f in
+                    let last = i == config.features.count - 1
+                    HStack(alignment: .top, spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(i == 0 ? accent : accentSoft)
+                                .frame(width: 34, height: 34)
+                            Text(present(f.icon) ?? "✓")
+                                .rnType(14)
+                                .foregroundStyle(i == 0 ? theme.accentInk : accent)
+                        }
+                        .frame(width: 34)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(f.title)
+                                .rnType(15.5, .semibold, lineHeight: 21)
+                                .foregroundStyle(theme.textPrimary)
+                            if let desc = present(f.description) {
+                                Text(desc)
+                                    .rnType(13, lineHeight: 18)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .padding(.top, 1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 6)
+                        .padding(.bottom, last ? 0 : 22)
+                    }
+                    .background(alignment: .leading) {
+                        if !last {
+                            // The rail segment toward the next dot: starts
+                            // below this row's 34pt dot, 4pt inset each end.
+                            Rectangle()
+                                .fill(accentTint)
+                                .frame(width: 2)
+                                .padding(.top, 34 + 4)
+                                .padding(.bottom, 4)
+                                .frame(width: 34)
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 26)
+        }
+    }
+
+    /// Feature grid: two-column soft cards with an accent icon tile each.
+    /// Paired rows mirror the RN flex-wrap: cards in a row share its height,
+    /// and an odd last card grows to the full row (RN's flexGrow).
+    @ViewBuilder
+    private var featureGrid: some View {
+        if !config.features.isEmpty {
+            let pairs = stride(from: 0, to: config.features.count, by: 2).map {
+                Array(config.features[$0..<min($0 + 2, config.features.count)])
+            }
+            VStack(spacing: 10) {
+                ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(Array(pair.enumerated()), id: \.offset) { _, f in
+                            gridCard(f)
+                        }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.bottom, 24)
+        }
+    }
+
+    private func gridCard(_ f: PaywallFeature) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(accentSoft)
+                    .frame(width: 34, height: 34)
+                Text(present(f.icon) ?? "✓")
+                    .rnType(15)
+                    .foregroundStyle(accent)
+            }
+            .padding(.bottom, 9)
+            Text(f.title)
+                .rnType(13.5, .semibold, lineHeight: 18)
+                .foregroundStyle(theme.textPrimary)
+            if let desc = present(f.description) {
+                Text(desc)
+                    .rnType(12, lineHeight: 16)
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.top, 3)
+            }
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(cardBg)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// Reveal: onboarding-style progress dots + numbered benefit cards.
+    private var progressDots: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(i == 0 ? accent : accentTint)
+                    .frame(width: 6, height: 6)
+            }
+        }
+        .padding(.bottom, 18)
+    }
+
+    @ViewBuilder
+    private var revealCards: some View {
+        if !config.features.isEmpty {
+            VStack(spacing: 10) {
+                ForEach(Array(config.features.enumerated()), id: \.offset) { i, f in
+                    HStack(alignment: .top, spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(accentSoft)
+                                .frame(width: 26, height: 26)
+                            Text(String(i + 1))
+                                .rnType(13, .bold)
+                                .foregroundStyle(accent)
+                        }
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(f.title)
+                                .rnType(15, .semibold, lineHeight: 20)
+                                .foregroundStyle(theme.textPrimary)
+                            if let desc = present(f.description) {
+                                Text(desc)
+                                    .rnType(13, lineHeight: 18)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .padding(.top, 1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(14)
+                    .background(cardBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+            }
+            .padding(.bottom, 24)
+        }
+    }
+
+    /// Social proof card: star row (+ numeric rating), quote, attribution.
+    @ViewBuilder
+    private var reviewCard: some View {
+        let review = config.review
+        let hasCard =
+            review != nil
+            && (review?.rating != nil || present(review?.quote) != nil)
+        if hasCard {
+            VStack(spacing: 0) {
+                if let rating = review?.rating {
+                    HStack(spacing: 0) {
+                        ForEach(1...5, id: \.self) { n in
+                            Text("★")
+                                .rnType(15)
+                                .foregroundStyle(
+                                    n <= Int(rating.rounded())
+                                        ? accent : theme.border
+                                )
+                                .padding(.horizontal, 1)
+                        }
+                        Text(ratingLabel(rating))
+                            .rnType(13, .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .padding(.leading, 6)
+                    }
+                }
+                if let quote = present(review?.quote) {
+                    Text("“\(quote)”")
+                        .rnType(13.5, lineHeight: 19)
+                        .italic()
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(theme.textPrimary)
+                        .padding(.top, 8)
+                }
+                if let author = present(review?.author) {
+                    Text("— \(author)")
+                        .rnType(12)
+                        .foregroundStyle(theme.textSecondary)
+                        .padding(.top, 6)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(14)
+            .background(cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .padding(.bottom, 22)
+        }
+    }
+
+    /// e.g. "Join 2M+ users" — small line under the CTA.
+    @ViewBuilder
+    private var countLine: some View {
+        if let count = present(config.review?.count) {
+            Text(count)
+                .rnType(12.5)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(theme.textSecondary)
+                .padding(.bottom, 14)
+        }
+    }
+
+    /// Offer urgency line above the CTA.
+    @ViewBuilder
+    private var urgencyLine: some View {
+        if let urgency = present(config.offer?.urgencyText) {
+            Text(urgency)
+                .rnType(13, .semibold)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(accent)
+                .padding(.bottom, 10)
+        }
+    }
+
+    @ViewBuilder
+    private func priceLine(
+        _ pkg: RevnixPaywallPackage, highlighted: Bool
+    ) -> some View {
+        let anchor = highlighted ? anchorPrice(for: pkg.priceLabel) : nil
+        if let anchor {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(anchor)
+                    .rnType(13)
+                    .strikethrough()
+                    .monospacedDigit()
+                    .foregroundStyle(theme.textFaint)
+                Text(pkg.priceLabel)
+                    .rnType(14)
+                    .monospacedDigit()
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .padding(.top, 2)
+        } else {
+            Text(pkg.priceLabel)
+                .rnType(14)
+                .monospacedDigit()
+                .foregroundStyle(theme.textSecondary)
+                .padding(.top, 2)
+        }
+    }
+
+    private func badgePill(_ text: String, maxWidth: CGFloat) -> some View {
+        Text(text)
+            .lineLimit(1)
+            .rnType(11, .bold)
+            .foregroundStyle(theme.accentInk)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(accent))
+            // A long badge string must never grow past the card edge (kept
+            // in lockstep with the dashboard preview, which truncates the
+            // same way).
+            .frame(maxWidth: maxWidth)
+    }
+
+    /// Standard package rows (all layouts except plans columns / offer
+    /// spotlight). `withBadge: false` suppresses the row badge where the
+    /// layout already presents the badge elsewhere (offer pill).
+    private func packageRows(
+        _ list: [RevnixPaywallPackage], withBadge: Bool, contentWidth: CGFloat
+    ) -> some View {
+        VStack(spacing: 12) {
+            ForEach(list) { pkg in
+                let selected = pkg.packageId == selectedId
+                let highlighted = pkg.packageId == config.highlightPackageId
+                let badge =
+                    withBadge && highlighted ? present(config.badgeText) : nil
+                Button {
+                    select(pkg.packageId)
+                } label: {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(pkg.title)
+                            .rnType(16, .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                        priceLine(pkg, highlighted: highlighted)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 15)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(
+                                selected ? accent : theme.border,
+                                lineWidth: selected ? 2 : 1)
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        if let badge {
+                            badgePill(badge, maxWidth: contentWidth * 0.8)
+                                .offset(x: -14, y: -11)
+                        }
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
+        }
+        .padding(.bottom, 22)
+    }
+
+    /// Plans layout: packages side by side as tier columns; the highlighted
+    /// tier carries the badge pill inside the column.
+    private var planColumns: some View {
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(shown) { pkg in
+                let selected = pkg.packageId == selectedId
+                let highlighted = pkg.packageId == config.highlightPackageId
+                Button {
+                    select(pkg.packageId)
+                } label: {
+                    VStack(spacing: 0) {
+                        if highlighted, let badge = present(config.badgeText) {
+                            badgePill(badge, maxWidth: .infinity)
+                                .padding(.bottom, 7)
+                        }
+                        Text(pkg.title)
+                            .rnType(14, .semibold, lineHeight: 19)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(theme.textPrimary)
+                        if highlighted,
+                            let anchor = anchorPrice(for: pkg.priceLabel)
+                        {
+                            Text(anchor)
+                                .rnType(13)
+                                .strikethrough()
+                                .monospacedDigit()
+                                .foregroundStyle(theme.textFaint)
+                        }
+                        Text(pkg.priceLabel)
+                            .rnType(15, .bold)
+                            .monospacedDigit()
+                            .foregroundStyle(theme.textPrimary)
+                            .padding(.top, 4)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 14)
+                    .frame(maxHeight: .infinity)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .strokeBorder(
+                                selected ? accent : theme.border,
+                                lineWidth: selected ? 2 : 1)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.bottom, 22)
+    }
+
+    /// Offer layout: the badge becomes a large centered pill; the
+    /// highlighted (else first) package renders as a spotlight card with
+    /// the anchor price.
+    private var spotlightPkg: RevnixPaywallPackage? {
+        shown.first { $0.packageId == config.highlightPackageId } ?? shown.first
+    }
+
+    @ViewBuilder
+    private func offerPill(contentWidth: CGFloat) -> some View {
+        if let badge = present(config.badgeText) {
+            Text(badge)
+                .lineLimit(1)
+                .rnType(12, .bold)
+                .foregroundStyle(theme.accentInk)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(accent))
+                .frame(maxWidth: contentWidth * 0.8)
+                .padding(.bottom, 14)
+        }
+    }
+
+    @ViewBuilder
+    private func offerSpotlight(contentWidth: CGFloat) -> some View {
+        if let pkg = spotlightPkg {
+            let selected = pkg.packageId == selectedId
+            Button {
+                select(pkg.packageId)
+            } label: {
+                VStack(spacing: 0) {
+                    Text(pkg.title)
+                        .rnType(16, .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if let anchor = anchorPrice(for: pkg.priceLabel) {
+                            Text(anchor)
+                                .rnType(15)
+                                .strikethrough()
+                                .monospacedDigit()
+                                .foregroundStyle(theme.textFaint)
+                        }
+                        Text(pkg.priceLabel)
+                            .rnType(24, .heavy)
+                            .monospacedDigit()
+                            .foregroundStyle(theme.textPrimary)
+                    }
+                    .padding(.top, 6)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(18)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(
+                            selected ? accent : theme.border, lineWidth: 2)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 16))
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? [.isSelected] : [])
+            .padding(.bottom, 12)
+            if shown.count > 1 {
+                packageRows(
+                    shown.filter { $0.packageId != pkg.packageId },
+                    withBadge: false, contentWidth: contentWidth)
+            }
+        }
+    }
+
+    private var cta: some View {
+        Button {
+            if !loading, let selectedId { onPurchase(selectedId) }
+        } label: {
+            ZStack {
+                if loading {
+                    ProgressView().tint(theme.accentInk)
+                } else {
+                    Text(config.ctaLabel)
+                        .rnType(16.5, .bold)
+                        .foregroundStyle(theme.accentInk)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 12).fill(accent))
+        }
+        // Not `.plain`: that style dims the whole accent fill while
+        // disabled, but the RN CTA keeps full accent behind the spinner.
+        .buttonStyle(UndimmedButtonStyle())
+        .disabled(loading || selectedId == nil)
+        .padding(.bottom, 14)
+    }
+
+    // Footer links are dashboard-configured (config.footer); a legacy config
+    // without the field keeps the original always-on footer. Explicit host
+    // handlers win over config URLs — the app knows best how to open its own
+    // legal pages (in-app browser etc.); the URL is the no-handler fallback.
+    private struct FooterItem: Identifiable {
+        let show: Bool
+        let label: String
+        let action: (() -> Void)?
+        var id: String { label }
+    }
+
+    private var footerItems: [FooterItem] {
+        let footer = config.footer
+        let open = { (url: String?) -> (() -> Void)? in
+            guard let url = present(url), let parsed = URL(string: url) else {
+                return nil
+            }
+            return { openURL(parsed) }
+        }
+        return [
+            FooterItem(
+                show: footer?.showRestore ?? true, label: "Restore",
+                action: onRestore),
+            FooterItem(
+                show: footer?.showTerms ?? true, label: "Terms",
+                action: onTerms ?? open(footer?.termsUrl)),
+            FooterItem(
+                show: footer?.showPrivacy ?? true, label: "Privacy",
+                action: onPrivacy ?? open(footer?.privacyUrl)),
+        ].filter { $0.show }
+    }
+
+    @ViewBuilder
+    private var footerBlock: some View {
+        let items = footerItems
+        if !items.isEmpty {
+            HStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
+                    if i > 0 {
+                        Text(" · ")
+                            .rnType(13)
+                            .foregroundStyle(theme.textFaint)
+                            .padding(.vertical, 4)
+                    }
+                    Button {
+                        item.action?()
+                    } label: {
+                        Text(item.label)
+                            .rnType(13)
+                            .foregroundStyle(theme.textFaint)
+                            .padding(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    /// Remote image scaled to cover its frame (RN resizeMode="cover"); the
+    /// clear base keeps the fill from blowing the layout past its frame.
+    private func coverImage(_ url: URL?) -> some View {
+        Color.clear.overlay {
+            AsyncImage(url: url) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                }
+            }
+        }
+        .clipped()
+    }
+}
+
+// MARK: - Private helpers
+
+/// Renders the label as-is (no press/disabled dimming) — RN Pressable
+/// applies no default feedback, and the loading CTA must keep its full
+/// accent fill behind the spinner.
+private struct UndimmedButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+    }
+}
+
+/// JS-truthiness mirror: the RN renderer's `config.field ?` treats an empty
+/// string the same as an absent one.
+private func present(_ value: String?) -> String? {
+    (value?.isEmpty ?? true) ? nil : value
+}
+
+/// JS `String(Number)`: whole ratings render without a trailing ".0".
+private func ratingLabel(_ rating: Double) -> String {
+    rating == rating.rounded() && rating.magnitude < Double(Int.max)
+        ? String(Int(rating)) : String(rating)
+}
+
+private func rgb(_ value: UInt32) -> Color {
+    Color(
+        red: Double((value >> 16) & 0xff) / 255,
+        green: Double((value >> 8) & 0xff) / 255,
+        blue: Double(value & 0xff) / 255)
+}
+
+extension Color {
+    /// Parses a dashboard accent like "#6478ff" (or "#fff"); nil on
+    /// anything else so the caller falls back to the default accent.
+    fileprivate init?(revnixHex hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self = rgb(v)
+    }
+}
+
+extension View {
+    /// RN Text style shorthand: fontSize/fontWeight, with RN `lineHeight`
+    /// approximated as extra line spacing over the system's ~1.2× line box.
+    fileprivate func rnType(
+        _ size: CGFloat, _ weight: Font.Weight = .regular,
+        lineHeight: CGFloat? = nil
+    ) -> some View {
+        font(.system(size: size, weight: weight))
+            .lineSpacing(lineHeight.map { max(0, $0 - size * 1.2) } ?? 0)
+    }
+}
+#endif
