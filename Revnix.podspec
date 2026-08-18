@@ -14,7 +14,7 @@ Pod::Spec.new do |s|
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'Oth Tech' => 'support@revnix.com' }
   s.source           = { :git => 'https://github.com/Oth-tech/revnix-swift.git', :tag => s.version.to_s }
-  s.documentation_url = 'https://revnix.com/docs/ios'
+  s.documentation_url = 'https://revnix.io/docs/ios'
 
   s.swift_versions   = ['5.9']
   s.ios.deployment_target     = '16.0'
