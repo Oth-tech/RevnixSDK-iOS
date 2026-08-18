@@ -107,6 +107,44 @@ first resolve on a covered placement — eligibility is checked at that resolve.
 attribute your backend already set cannot be changed from a device; both
 reject the whole batch rather than applying part of it.
 
+## Paywall UI
+
+`RevnixPaywallView` renders the resolved config as SwiftUI — all nine layouts,
+light/dark mode, accent, badge, social proof, offer anchors — in lockstep with
+the dashboard's paywall-builder preview and the React Native renderer. You
+supply the titles and localized prices from StoreKit, so the display never
+disagrees with the charge:
+
+```swift
+let resolution = try await client.resolvePlacement("paywall_main")
+if let paywall = resolution.paywall {
+    RevnixPaywallView(
+        config: paywall.config,
+        packages: products.map { product in
+            RevnixPaywallPackage(
+                packageId: packageId(for: product),
+                title: product.displayName,
+                priceLabel: product.displayPrice)
+        },
+        onPurchase: { packageId in /* RevnixStoreKit.purchase(…) */ },
+        loading: purchasing,
+        onRestore: { Task { await RevnixStoreKit.restore(client: client) } },
+        client: client,          // reports one paywall.viewed per appearance
+        placementKey: "paywall_main",
+        paywallId: paywall.paywallId
+    )
+}
+```
+
+Selection is internal by default (initially the config's highlight package)
+or controlled via `selectedPackageId`/`onSelectPackage`; `theme:` takes a
+partial `RevnixPaywallTheme.Override` on top of the config's mode; footer
+links follow `config.footer` — explicit `onTerms`/`onPrivacy` handlers win
+over configured URLs, which otherwise open via the environment's `openURL`.
+An unrecognized future `template` renders the classic layout rather than
+nothing, and a struck-through anchor price is dropped whenever its currency
+symbol disagrees with the store's localized price.
+
 ## API surface
 
 Beyond the calls shown above:
@@ -174,7 +212,6 @@ the full purchase → register → unlock path.
 
 ## Not in v1
 
-- Paywall UI rendering — `resolvePlacement` ships the config, your app renders it.
 - `identify` / `alias` — server-proxied by design (see above).
 - Amazon and other stores.
 
