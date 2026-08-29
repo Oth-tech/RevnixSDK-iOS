@@ -1,10 +1,10 @@
 # Revnix Swift SDK
 
-Native Swift SDK for [Revnix](https://revnix.io) — StoreKit 2 purchase glue plus
+Native Swift SDK for [Revnix](https://revnix.io), StoreKit 2 purchase glue plus
 the same resilience policy as `revnix-react`.
 
 - **StoreKit 2 native.** One call from tap to unlocked gate, with the JWS as
-  server-verifiable proof — claims are never provisional.
+  server-verifiable proof: claims are never provisional.
 - **Offline-correct by design.** A network blip keeps paying customers unlocked;
   a revoked key still locks them out. Those are different cases and the SDK
   treats them differently.
@@ -15,7 +15,7 @@ Requires iOS 16+ / macOS 13+ / tvOS 16+ / watchOS 9+ and Swift 5.9.
 
 ## Install
 
-> Neither coordinate below resolves yet — see
+> Neither coordinate below resolves yet; see
 > [Distribution status](#distribution-status).
 
 **Swift Package Manager**
@@ -55,14 +55,14 @@ if await client.isEntitled("pro") { /* … */ }
 ```
 
 Use the **publishable** key (`rvx_pk_…`) only. Secret keys must never ship in a
-binary, so `identify`/`alias` are deliberately not SDK methods — proxy them from
+binary, so `identify`/`alias` are deliberately not SDK methods; proxy them from
 your server (see the docs recipe).
 
 ## Paywalls and A/B tests
 
 `resolvePlacement` returns the published offering plus a **typed**
-`PaywallConfig`: nine layouts in `template` — `focus`, `feature-list`,
-`minimal`, `hero`, `timeline`, `plans`, `feature-grid`, `offer`, `reveal` — a
+`PaywallConfig`: nine layouts in `template`: `focus`, `feature-list`,
+`minimal`, `hero`, `timeline`, `plans`, `feature-grid`, `offer`, `reveal`, a
 light/dark `mode`, and optional `review` (stars, quote, author, count) and
 `offer` (anchor price, urgency line) blocks. `template` stays a `String` on
 purpose so a config published with a future layout still decodes instead of
@@ -71,7 +71,7 @@ so the display can never disagree with the charge.
 
 The resolve sends the customer id, so a running A/B test serves that
 customer's variant. The `offering` and `paywall` you get back are *already*
-the variant's — render them as-is. `experiment` is attribution metadata, and
+the variant's; render them as-is. `experiment` is attribution metadata, and
 is `nil` when no running test covers the placement:
 
 ```swift
@@ -88,7 +88,7 @@ Assignment is sticky per customer and survives identity merges.
 
 ### Targeting: `setAttributes`
 
-A test can be narrowed to an audience — conditions over customer attributes.
+A test can be narrowed to an audience: conditions over customer attributes.
 `setAttributes` supplies the facts those conditions read, which for a
 mobile-only app is the only place they exist:
 
@@ -102,15 +102,15 @@ try await client.setAttributes([
 
 This awaits the write rather than firing and forgetting, because the next
 `resolvePlacement` may depend on it. Set an audience's attributes *before* the
-first resolve on a covered placement — eligibility is checked at that resolve.
+first resolve on a covered placement; eligibility is checked at that resolve.
 `email` and `username` are reserved (secret key, from your server), and an
 attribute your backend already set cannot be changed from a device; both
 reject the whole batch rather than applying part of it.
 
 ## Paywall UI
 
-`RevnixPaywallView` renders the resolved config as SwiftUI — all nine layouts,
-light/dark mode, accent, badge, social proof, offer anchors — in lockstep with
+`RevnixPaywallView` renders the resolved config as SwiftUI (all nine layouts,
+light/dark mode, accent, badge, social proof, offer anchors), in lockstep with
 the dashboard's paywall-builder preview and the React Native renderer. You
 supply the titles and localized prices from StoreKit, so the display never
 disagrees with the charge:
@@ -139,7 +139,7 @@ if let paywall = resolution.paywall {
 Selection is internal by default (initially the config's highlight package)
 or controlled via `selectedPackageId`/`onSelectPackage`; `theme:` takes a
 partial `RevnixPaywallTheme.Override` on top of the config's mode; footer
-links follow `config.footer` — explicit `onTerms`/`onPrivacy` handlers win
+links follow `config.footer`; explicit `onTerms`/`onPrivacy` handlers win
 over configured URLs, which otherwise open via the environment's `openURL`.
 An unrecognized future `template` renders the classic layout rather than
 nothing, and a struck-through anchor price is dropped whenever its currency
@@ -152,7 +152,7 @@ Beyond the calls shown above:
 | API | What it does |
 |---|---|
 | `RevnixStoreKit.restore(client:) async -> Int` | Re-registers everything in `Transaction.currentEntitlements` (wire it to a "Restore purchases" button). The server dedupes on the shared purchase key, so it is always safe; returns the number registered. |
-| `client.customerId() -> String` | Current customer id — an `rvx_anon_…` id is minted (and persisted) on first call. |
+| `client.customerId() -> String` | Current customer id; an `rvx_anon_…` id is minted (and persisted) on first call. |
 | `client.logout() -> String` | Mints a fresh anonymous customer locally and returns it. Call at sign-out, or the next user inherits the previous one's cached entitlements. |
 | `client.cachedEntitlements() -> CustomerEntitlements?` | Last cached snapshot with the offline policy applied, no network; `nil` when the customer has never had a live read. |
 | `client.logPaywallShown(placementKey:paywallId:) async` | Fire-and-forget impression beacon (feeds funnels and view conversions); failures go to `onDiagnostic`, never thrown. |
@@ -167,10 +167,10 @@ Everything but `apiKey` and `baseURL` has a default:
 | `storage` | `FileStorage()` | Persistence adapter (`RevnixStorage` protocol). `FileStorage` writes to Application Support; `MemoryStorage` is provided for tests / ephemeral use. |
 | `timeout` | `10` s | Per-request timeout. |
 | `offlineMaxCacheAge` | 14 days | Cache-served snapshots older than this serve every entitlement as inactive. |
-| `entitlementsTTL` | `30` s | Soft TTL on entitlement reads — a snapshot this fresh answers without a network round trip. `0` restores always-fetch. |
+| `entitlementsTTL` | `30` s | Soft TTL on entitlement reads: a snapshot this fresh answers without a network round trip. `0` restores always-fetch. |
 | `readYourWritesDelays` | `[0.25, 0.5, 1, 2]` | Post-purchase entitlement poll schedule in seconds, jittered ±20%; empty disables polling. |
-| `onDiagnostic` | — | Callback for swallowed background failures. |
-| `now` / `session` | — | Injectable clock and `URLSession` for tests. |
+| `onDiagnostic` | n/a | Callback for swallowed background failures. |
+| `now` / `session` | n/a | Injectable clock and `URLSession` for tests. |
 
 ## Resilience policy
 
@@ -182,7 +182,7 @@ This is a product contract, not an implementation detail. `revnix-react`'s
 |---|---|
 | Entitlement reads | Network-first |
 | Transient failure (offline, timeout, 429, 5xx, non-JSON 200) | Serve cache, `stale = true` |
-| Deliberate rejection (401/403/404/409) | **Always throw** — a cache must never defeat a kill-switch |
+| Deliberate rejection (401/403/404/409) | **Always throw**: a cache must never defeat a kill-switch |
 | Cached entitlement past `expiresAt` | Grace 3 days, then inactive (covers a renewal an offline device cannot see) |
 | Cache age ceiling | 14 days → all inactive |
 | Clock rolled back > 5 min | All inactive |
@@ -191,8 +191,8 @@ This is a product contract, not an implementation detail. `revnix-react`'s
 | Retry / poll delays | ±20% jitter; `Retry-After` honored when the server sends it |
 | Swallowed background failures | `onDiagnostic` callback; count rides `X-Revnix-Bg-Failures` |
 
-`waitForEntitlements(seq:)` bypasses the soft TTL — the point of that poll is a
-fresh ledger cursor — and resolves with the last read rather than throwing if
+`waitForEntitlements(seq:)` bypasses the soft TTL (the point of that poll is a
+fresh ledger cursor), and resolves with the last read rather than throwing if
 the ledger never catches up.
 
 ## Tests
@@ -212,7 +212,7 @@ the full purchase → register → unlock path.
 
 ## Not in v1
 
-- `identify` / `alias` — server-proxied by design (see above).
+- `identify` / `alias`: server-proxied by design (see above).
 - Amazon and other stores.
 
 ## Distribution status
@@ -220,6 +220,6 @@ the full purchase → register → unlock path.
 **Not yet published.** The Swift Package Manager and CocoaPods coordinates
 above are the intended ones, but neither the repository nor the pod is public
 yet, so `swift package resolve` / `pod install` will not find them. Until they
-ship, apps integrate over the [REST API](https://revnix.io/docs/ios) — the
+ship, apps integrate over the [REST API](https://revnix.io/docs/ios), the
 same `/v1` contract this SDK speaks, so migrating later does not change the
 backend integration.
