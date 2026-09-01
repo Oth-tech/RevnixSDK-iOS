@@ -29,13 +29,33 @@ public struct RevnixPaywallPackage: Identifiable, Sendable, Equatable {
     public let packageId: String
     public let title: String
     public let priceLabel: String
+    /// Renewal cycle from the product ("annual", "monthly", "weekly", …).
+    /// Drives the `{period}` / `{period_short}` tags on a designed paywall;
+    /// absent for lifetime and one-time products.
+    public let period: String?
+    /// The store's price in MINOR units, with its currency — what
+    /// `{price_per_month}` and `{save_percent}` are computed from. Omit them
+    /// and those tags stay visible rather than resolving to a wrong number;
+    /// see `revnixMinorUnits(for:)` before converting from major units.
+    public let amountMinor: Int?
+    public let currency: String?
 
     public var id: String { packageId }
 
-    public init(packageId: String, title: String, priceLabel: String) {
+    public init(
+        packageId: String,
+        title: String,
+        priceLabel: String,
+        period: String? = nil,
+        amountMinor: Int? = nil,
+        currency: String? = nil
+    ) {
         self.packageId = packageId
         self.title = title
         self.priceLabel = priceLabel
+        self.period = period
+        self.amountMinor = amountMinor
+        self.currency = currency
     }
 }
 
@@ -273,6 +293,40 @@ public struct RevnixPaywallView: View {
     //  · on tablets/wide screens the column stays a readable width (max 440),
     //    horizontally centered, instead of stretching edge to edge.
     public var body: some View {
+        // Precedence: a designed paywall (`config.blocks`) wins over the
+        // classic layouts below, which stay the fallback for every paywall
+        // published before the block builder — so anything already live
+        // renders unchanged.
+        if let blockDoc = config.blocks {
+            blockScreen(blockDoc)
+        } else {
+            classicBody
+        }
+    }
+
+    /// The designed-paywall path. The document carries its own palette, so the
+    /// classic theme and the `template` layout play no part here.
+    private func blockScreen(_ blockDoc: PaywallBlockDoc) -> some View {
+        RevnixPaywallBlockView(
+            doc: blockDoc,
+            ctx: BlockContext(
+                doc: blockDoc,
+                packages: packages,
+                selectedPackageId: selectedId,
+                heroImageUrl: config.heroImageUrl,
+                footerTermsUrl: config.footer?.termsUrl,
+                footerPrivacyUrl: config.footer?.privacyUrl,
+                onPurchase: { id in if !loading { onPurchase(id) } },
+                onRestore: onRestore,
+                onTerms: onTerms,
+                onPrivacy: onPrivacy,
+                openURL: { url in openURL(url) }
+            )
+        )
+        .onAppear(perform: reportViewOnce)
+    }
+
+    private var classicBody: some View {
         GeometryReader { geo in
             let contentWidth = min(440, max(0, geo.size.width - 48))
             ScrollView(.vertical, showsIndicators: false) {
@@ -287,19 +341,21 @@ public struct RevnixPaywallView: View {
             }
         }
         .background(theme.background.ignoresSafeArea())
-        .onAppear {
-            // One view per appearance of this view identity: a re-presented
-            // paywall (new sheet / new identity) is a genuine new display;
-            // re-renders and navigation round-trips are not — the RN
-            // renderer's one-report-per-mount rule.
-            guard let client, !disableViewTracking, !didReportView else { return }
-            didReportView = true
-            let placementKey = placementKey
-            let paywallId = paywallId
-            Task {
-                await client.logPaywallShown(
-                    placementKey: placementKey, paywallId: paywallId)
-            }
+        .onAppear(perform: reportViewOnce)
+    }
+
+    /// One view per appearance of this view identity: a re-presented paywall
+    /// (new sheet / new identity) is a genuine new display; re-renders and
+    /// navigation round-trips are not — the RN renderer's one-report-per-mount
+    /// rule. Shared by both render paths so a designed paywall reports its
+    /// view exactly like a classic one.
+    private func reportViewOnce() {
+        guard let client, !disableViewTracking, !didReportView else { return }
+        didReportView = true
+        let placementKey = placementKey
+        let paywallId = paywallId
+        Task {
+            await client.logPaywallShown(placementKey: placementKey, paywallId: paywallId)
         }
     }
 
