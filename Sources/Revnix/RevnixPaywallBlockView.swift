@@ -142,6 +142,10 @@ func revnixBlockColor(_ value: String?, _ doc: PaywallBlockDoc) -> Color? {
         switch name {
         case "accent": raw = doc.accent
         case "accentInk": raw = doc.accentInk
+        // The raw ground, gradient and all — exactly what the dashboard
+        // answers `@bg` with. A gradient is not a colour, so the initialiser
+        // below returns nil and the caller keeps its own default, which is
+        // what the builder shows for a `@bg` tint over a gradient.
         case "bg": raw = doc.background
         case "text": raw = doc.textColor
         default: return nil
@@ -751,7 +755,34 @@ struct RevnixPaywallBlockView: View {
                 }
             }
         }
-        .background((revnixBlockColor(doc.background, doc) ?? .black).ignoresSafeArea())
+        .background(screenBackground.ignoresSafeArea())
+    }
+
+    /// The screen background: ground, then photo, then scrim — the same three
+    /// layers, in the same order, as the dashboard renderer paints. A document
+    /// whose background is still a plain colour resolves to a ground and
+    /// nothing else, so that case renders exactly as it did before.
+    @ViewBuilder private var screenBackground: some View {
+        let layers = revnixBackgroundLayers(doc.backgroundSpec)
+        let ground = layers.ground ?? doc.background
+        ZStack {
+            // The flat colour under everything. A gradient resolves to its
+            // first stop here, so a form the parser does not understand still
+            // shows a colour from the design rather than black.
+            (revnixBlockColor(revnixBackgroundBaseColor(ground), doc) ?? .black)
+
+            ForEach(Array(revnixParseCssGradients(ground, isColor: { revnixBlockColor($0, doc) != nil }).enumerated()), id: \.offset) { _, gradient in
+                RevnixGradientView(gradient: gradient, doc: doc)
+            }
+
+            if let image = layers.image {
+                RevnixBackgroundPhotoView(image: image)
+            }
+
+            if let overlay = layers.overlay {
+                RevnixScrimView(overlay: overlay, doc: doc)
+            }
+        }
     }
 
     private var content: some View {
@@ -760,6 +791,161 @@ struct RevnixPaywallBlockView: View {
                 BlockView(block: block, ctx: ctx)
             }
         }
+    }
+}
+
+/// One parsed CSS gradient as a SwiftUI gradient.
+///
+/// The stops carry colour STRINGS rather than resolved colours so the palette
+/// tokens inside a scrim (`@bg/40`) resolve against the same document the rest
+/// of the screen uses.
+struct RevnixGradientView: View {
+    let gradient: RevnixGradient
+    let doc: PaywallBlockDoc
+
+    var body: some View {
+        let stops = gradient.stops.map { stop in
+            Gradient.Stop(
+                color: revnixBlockColor(stop.color, doc) ?? .clear,
+                location: stop.position
+            )
+        }
+        switch gradient {
+        case let .linear(dirX, dirY, _):
+            // The direction is a unit vector scaled so its largest component is
+            // 1, so half of it either side of the centre reaches the box edge —
+            // the CSS gradient line.
+            LinearGradient(
+                stops: stops,
+                startPoint: UnitPoint(x: 0.5 - dirX / 2, y: 0.5 - dirY / 2),
+                endPoint: UnitPoint(x: 0.5 + dirX / 2, y: 0.5 + dirY / 2)
+            )
+        case let .radial(centerX, centerY, radius, _):
+            GeometryReader { geo in
+                RadialGradient(
+                    stops: stops,
+                    center: UnitPoint(x: centerX, y: centerY),
+                    startRadius: 0,
+                    endRadius: radius * max(geo.size.width, geo.size.height)
+                )
+            }
+        }
+    }
+}
+
+/// The screen background's photo layer.
+///
+/// `AsyncImage` has no `object-position`, so a focal point other than the
+/// centre is drawn with a scaled fill clipped to the box — the same rule CSS
+/// applies for `object-position: X% Y%`, where the X% point of the image aligns
+/// to the X% point of the box. A photo that will not load leaves the ground and
+/// scrim in place rather than blacking out the screen.
+struct RevnixBackgroundPhotoView: View {
+    let image: RevnixBackgroundImage
+
+    @State private var source: CGSize?
+
+    var body: some View {
+        GeometryReader { geo in
+            AsyncImage(url: URL(string: image.url)) { phase in
+                if let loaded = phase.image {
+                    photo(loaded, in: geo.size)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
+        }
+        .opacity(image.opacity)
+        .modifier(RevnixBlurModifier(radius: image.blur))
+        .allowsHitTesting(false)
+        .task(id: image.url) { source = await revnixImageSize(image.url) }
+    }
+
+    /// `contain` and a centred `cover` need no geometry, so they take the
+    /// plain resizable path and never wait on a measurement — which is also
+    /// what shows while an off-centre photo's size is still being fetched, so
+    /// there is no flash of a wrongly cropped image.
+    @ViewBuilder
+    private func photo(_ loaded: Image, in box: CGSize) -> some View {
+        let centred = image.focalX == 50 && image.focalY == 50
+        if image.fit == .contain || centred || source == nil {
+            loaded
+                .resizable()
+                .aspectRatio(contentMode: image.fit == .contain ? .fit : .fill)
+                .frame(width: box.width, height: box.height)
+        } else {
+            let placement = revnixCoverPlacement(
+                box: (Double(box.width), Double(box.height)),
+                source: (Double(source!.width), Double(source!.height)),
+                focalX: image.focalX,
+                focalY: image.focalY
+            )
+            loaded
+                .resizable()
+                .frame(width: placement.width, height: placement.height)
+                .offset(x: placement.left, y: placement.top)
+                .frame(width: box.width, height: box.height, alignment: .topLeading)
+        }
+    }
+}
+
+/// The pixel dimensions of a remote image, or nil if it cannot be measured.
+///
+/// `AsyncImage` hands back a SwiftUI `Image`, which has no size, so the focal
+/// crop needs its own fetch. A failed measure is not an error worth surfacing:
+/// the centred path above stays in place.
+func revnixImageSize(_ url: String) async -> CGSize? {
+    guard let url = URL(string: url) else { return nil }
+    guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+    #if canImport(UIKit)
+    return UIImage(data: data)?.size
+    #elseif canImport(AppKit)
+    guard let rep = NSBitmapImageRep(data: data) else { return nil }
+    return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+    #else
+    return nil
+    #endif
+}
+
+/// A blur applied only when the design asked for one, so an unblurred photo
+/// keeps its original render path.
+struct RevnixBlurModifier: ViewModifier {
+    let radius: Double?
+
+    func body(content: Content) -> some View {
+        if let radius, radius > 0 {
+            // A blurred layer bleeds its transparent edge inward, which reads
+            // as a bright rim over the ground. Scaling past the edges hides it.
+            content.blur(radius: radius).scaleEffect(1.1)
+        } else {
+            content
+        }
+    }
+}
+
+/// The scrim over the photo: a solid fill or a gradient stack.
+struct RevnixScrimView: View {
+    let overlay: RevnixBackgroundOverlay
+    let doc: PaywallBlockDoc
+
+    var body: some View {
+        let gradients = revnixParseCssGradients(
+            overlay.fill,
+            isColor: { revnixBlockColor($0, doc) != nil }
+        )
+        ZStack {
+            if gradients.isEmpty {
+                revnixBlockColor(overlay.fill, doc) ?? .clear
+            } else {
+                ForEach(Array(gradients.enumerated()), id: \.offset) { _, gradient in
+                    RevnixGradientView(gradient: gradient, doc: doc)
+                }
+            }
+        }
+        .opacity(overlay.opacity)
+        .allowsHitTesting(false)
     }
 }
 #endif

@@ -263,12 +263,34 @@ final class PaywallBlockTests: XCTestCase {
     }
 
     func testLayeredBackgroundReducesToItsGroundColour() throws {
+        // The dashboard's ground field is `color`. This test used to assert
+        // `ground` — the name of the RESOLVED layer, which no writer has ever
+        // emitted — and that is precisely why the black-screen bug shipped:
+        // the wrong contract was green.
         let doc = try decodeDoc("""
-            {"version":1,"background":{"ground":"#0B0D10","image":{"url":"https://x/y.jpg"}},
+            {"version":1,"background":{"color":"#0B0D10","image":{"url":"https://x/y.jpg"}},
              "textColor":"#fff","accent":"#6478ff","accentInk":"#000",
              "blocks":[{"id":"t","type":"text","text":"x"}]}
             """)
         XCTAssertEqual(doc.background, "#0B0D10")
+    }
+
+    func testLegacyGroundKeyIsStillHonoured() throws {
+        let doc = try decodeDoc("""
+            {"version":1,"background":{"ground":"#0B0D10"},
+             "textColor":"#fff","accent":"#6478ff","accentInk":"#000",
+             "blocks":[{"id":"t","type":"text","text":"x"}]}
+            """)
+        XCTAssertEqual(doc.background, "#0B0D10")
+    }
+
+    func testColorWinsOverGroundWhenBothArePresent() throws {
+        let doc = try decodeDoc("""
+            {"version":1,"background":{"color":"#111820","ground":"#FF0000"},
+             "textColor":"#fff","accent":"#6478ff","accentInk":"#000",
+             "blocks":[{"id":"t","type":"text","text":"x"}]}
+            """)
+        XCTAssertEqual(doc.background, "#111820")
     }
 
     // MARK: - Style values
