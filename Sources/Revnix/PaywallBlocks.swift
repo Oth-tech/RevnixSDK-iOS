@@ -247,9 +247,22 @@ public enum BlockDimension: Codable, Sendable, Equatable {
 
 // MARK: - Blocks
 
+/// What tapping a block does. Nil means the block is decoration.
+///
+/// A FIELD on the existing block types rather than a new block type: an SDK
+/// older than this one drops the field and still renders the element exactly
+/// as it does today, so a design carrying a close chip degrades to inert. A
+/// new block type would have decoded to `.unknown` and vanished from the
+/// screen instead — worse than the bug this fixes.
+public enum BlockAction: String, Sendable, Equatable {
+    case close
+}
+
 public struct TextBlock: Sendable, Equatable {
     public var id: String
     public var text: String
+    /// Tapping this block dismisses the paywall. See `BlockAction`.
+    public var action: BlockAction?
     public var style: BlockStyle?
 }
 
@@ -260,6 +273,8 @@ public struct ImageBlock: Sendable, Equatable {
     public var shape: String?
     public var fit: String?
     public var placeholder: String?
+    /// Tapping this block dismisses the paywall. See `BlockAction`.
+    public var action: BlockAction?
     public var style: BlockStyle?
 }
 
@@ -300,6 +315,9 @@ public struct ProductsBlock: Sendable, Equatable {
 public struct ButtonBlock: Sendable, Equatable {
     public var id: String
     public var label: String
+    /// `.close` turns this button into a dismiss ("Not now") instead of the
+    /// purchase CTA, which is what a button means by default.
+    public var action: BlockAction?
     public var style: BlockStyle?
 }
 
@@ -368,7 +386,7 @@ public indirect enum PaywallBlock: Sendable, Equatable {
 
 extension PaywallBlock: Decodable {
     private enum Keys: String, CodingKey {
-        case id, type, text, url, shape, fit, placeholder, style, items, iconColor
+        case id, type, text, url, shape, fit, placeholder, style, items, iconColor, action
         case direction, titleTpl, priceTpl, highlightSub, badgeText, cardStyle, highlightStyle
         case label, showRestore, showTerms, showPrivacy, termsUrl, privacyUrl
         case flex, layout, `repeat`, selectedStyle, packageIndex, columns, gridColumns, children
@@ -386,14 +404,18 @@ extension PaywallBlock: Decodable {
         func string(_ key: Keys) -> String? { (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil }
         func bool(_ key: Keys) -> Bool? { (try? c.decodeIfPresent(Bool.self, forKey: key)) ?? nil }
         func styleAt(_ key: Keys) -> BlockStyle? { (try? c.decodeIfPresent(BlockStyle.self, forKey: key)) ?? nil }
+        // An action value this SDK does not know decodes to nil, leaving the
+        // element inert rather than failing the block — the same forgiveness
+        // the unknown-type catch-all gives.
+        let action = string(.action).flatMap(BlockAction.init(rawValue:))
 
         switch type {
         case "text":
-            self = .text(TextBlock(id: id, text: string(.text) ?? "", style: style))
+            self = .text(TextBlock(id: id, text: string(.text) ?? "", action: action, style: style))
         case "image":
             self = .image(ImageBlock(
                 id: id, url: string(.url), shape: string(.shape), fit: string(.fit),
-                placeholder: string(.placeholder), style: style
+                placeholder: string(.placeholder), action: action, style: style
             ))
         case "list":
             let items = (try? c.decodeIfPresent([ListItem].self, forKey: .items)) as? [ListItem] ?? []
@@ -406,7 +428,7 @@ extension PaywallBlock: Decodable {
                 highlightStyle: styleAt(.highlightStyle), style: style
             ))
         case "button":
-            self = .button(ButtonBlock(id: id, label: string(.label) ?? "", style: style))
+            self = .button(ButtonBlock(id: id, label: string(.label) ?? "", action: action, style: style))
         case "links":
             self = .links(LinksBlock(
                 id: id, showRestore: bool(.showRestore), showTerms: bool(.showTerms),
@@ -562,5 +584,33 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
         accent = ((try? c.decodeIfPresent(String.self, forKey: .accent)) as? String) ?? "#6478ff"
         accentInk = ((try? c.decodeIfPresent(String.self, forKey: .accentInk)) as? String) ?? "#FFFFFF"
         fontFamily = try? c.decodeIfPresent(String.self, forKey: .fontFamily)
+    }
+}
+
+/// Does this tree author a dismiss affordance that is CERTAIN to render?
+///
+/// The renderer draws its own close button only when this is false, so a
+/// design published before close existed becomes dismissible without being
+/// re-authored, and a design that DOES author a close chip never shows two.
+/// The same predicate exists in every Revnix SDK — keep them identical.
+///
+/// Conditional containers are deliberately not searched: a `repeat` card
+/// renders once per package (none, when the offering is empty) and a
+/// `packageIndex` card is hidden when the offering does not reach that index,
+/// so a close authored inside one MIGHT not appear. Counting it would
+/// suppress the fallback and leave the customer with no way out — the exact
+/// bug this feature exists to fix. Two close buttons is merely ugly, so the
+/// tie breaks toward always having one.
+public func revnixHasCloseAction(_ blocks: [PaywallBlock]) -> Bool {
+    blocks.contains { block in
+        switch block {
+        case let .text(b): return b.action == .close
+        case let .image(b): return b.action == .close
+        case let .button(b): return b.action == .close
+        case let .card(b):
+            guard b.repeatMode == nil, b.packageIndex == nil else { return false }
+            return revnixHasCloseAction(b.children)
+        default: return false
+        }
     }
 }

@@ -315,7 +315,33 @@ struct BlockContext {
     let onRestore: (() -> Void)?
     let onTerms: (() -> Void)?
     let onPrivacy: (() -> Void)?
+    /// Dismissal (REV-252). Nil means the host wired none, and no close is
+    /// drawn at all — a dead close button is worse than none.
+    let onClose: (() -> Void)?
     let openURL: (URL) -> Void
+}
+
+/// Makes an element the paywall's dismiss target when the design marks it as
+/// one. A block with no close action installs no gesture at all, so it never
+/// swallows a tap meant for what sits behind it.
+struct CloseOnTap: ViewModifier {
+    let action: BlockAction?
+    let onClose: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if action == .close, let onClose {
+            // The whole box is the target, not just the glyph: a close chip
+            // is mostly padding, and a bare × is well under the 44pt minimum.
+            content
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onClose)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Close")
+        } else {
+            content
+        }
+    }
 }
 
 /// Renders one block. Anything it cannot render contributes nothing and its
@@ -335,9 +361,11 @@ struct BlockView: View {
             Text(revnixResolveTags(b.text, package: package, all: ctx.packages))
                 .modifier(TextStyling(style: b.style, doc: doc))
                 .revnixBlockStyle(b.style, doc, inStack: inStack)
+                .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
 
         case let .image(b):
             ImageBlockView(block: b, ctx: ctx, inStack: inStack)
+                .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
 
         case let .list(b):
             VStack(alignment: .leading, spacing: b.style?.gap ?? 8) {
@@ -364,8 +392,17 @@ struct BlockView: View {
                 .revnixBlockStyle(b.style, doc, inStack: inStack)
 
         case let .button(b):
+            // A button the design marks as the close dismisses instead of
+            // buying, and takes no accent fill: the CTA must stay the one
+            // accented thing on the screen, or a "Not now" competes with
+            // "Subscribe" for the eye.
+            let closesPaywall = b.action == .close && ctx.onClose != nil
             Button {
-                if let id = ctx.selectedPackageId ?? ctx.packages.first?.packageId { ctx.onPurchase(id) }
+                if closesPaywall {
+                    ctx.onClose?()
+                } else if let id = ctx.selectedPackageId ?? ctx.packages.first?.packageId {
+                    ctx.onPurchase(id)
+                }
             } label: {
                 Text(revnixResolveTags(b.label, package: package, all: ctx.packages))
                     .modifier(TextStyling(style: b.style, doc: doc, defaultWeight: .heavy, defaultSize: 15))
@@ -373,8 +410,10 @@ struct BlockView: View {
                     .padding(.vertical, b.style?.height == nil ? 15 : 0)
                     .padding(.horizontal, 16)
                     .frame(height: b.style?.height?.points.map { CGFloat($0) })
-                    .background(revnixBlockColor(doc.accent, doc) ?? .accentColor)
-                    .foregroundStyle(revnixBlockColor(doc.accentInk, doc) ?? .white)
+                    .background(closesPaywall ? Color.clear : (revnixBlockColor(doc.accent, doc) ?? .accentColor))
+                    .foregroundStyle(closesPaywall
+                        ? (revnixBlockColor(doc.textColor, doc) ?? .primary)
+                        : (revnixBlockColor(doc.accentInk, doc) ?? .white))
                     .clipShape(RoundedRectangle(cornerRadius: b.style?.radius ?? 12))
             }
             .buttonStyle(.plain)
@@ -783,19 +822,51 @@ struct RevnixPaywallBlockView: View {
     var body: some View {
         GeometryReader { geo in
             let scale = geo.size.width / PaywallBlockDoc.canvasWidth
-            if doc.layout == "canvas" {
-                content
-                    .frame(width: PaywallBlockDoc.canvasWidth, height: PaywallBlockDoc.canvasHeight, alignment: .topLeading)
-                    .scaleEffect(scale, anchor: .topLeading)
-                    .frame(width: geo.size.width, height: PaywallBlockDoc.canvasHeight * scale, alignment: .topLeading)
-                    .clipped()
-            } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    content.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+            // REV-252: overlaid OUTSIDE the canvas scale, so the fallback close
+            // keeps its tap size and its distance from the screen edge whatever
+            // the device width does to the design.
+            ZStack(alignment: .topTrailing) {
+                if doc.layout == "canvas" {
+                    content
+                        .frame(width: PaywallBlockDoc.canvasWidth, height: PaywallBlockDoc.canvasHeight, alignment: .topLeading)
+                        .scaleEffect(scale, anchor: .topLeading)
+                        .frame(width: geo.size.width, height: PaywallBlockDoc.canvasHeight * scale, alignment: .topLeading)
+                        .clipped()
+                } else {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        content.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+                    }
                 }
+                fallbackClose
             }
         }
         .background(screenBackground.ignoresSafeArea())
+    }
+
+    /// The dismiss affordance the renderer supplies itself (REV-252).
+    ///
+    /// Drawn only when the design authors no close of its own AND the host
+    /// wired an `onClose` — which is what makes every paywall published before
+    /// close existed dismissible without being re-authored, while a design
+    /// that DOES carry a close chip never ends up showing two.
+    ///
+    /// Deliberately plain: it is a safety net, not a design element. Tinted
+    /// from the screen's own ink rather than a fixed white, so it stays
+    /// legible on a light design as well as a dark one.
+    @ViewBuilder private var fallbackClose: some View {
+        if let onClose = ctx.onClose, !revnixHasCloseAction(doc.blocks) {
+            let ink = revnixBlockColor(doc.textColor, doc) ?? .primary
+            Button(action: onClose) {
+                Text(verbatim: "\u{00D7}")
+                    .font(.system(size: 17))
+                    .foregroundStyle(ink)
+                    .frame(width: 30, height: 30)
+                    .background(ink.opacity(0.14), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+            .padding(14)
+        }
     }
 
     /// The screen background: ground, then photo, then scrim — the same three

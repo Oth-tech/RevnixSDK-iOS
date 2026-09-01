@@ -138,6 +138,28 @@ public struct RevnixPaywallTheme: Equatable {
 /// the way the RN renderer's structurally-typed `client` prop does.
 public protocol RevnixPaywallViewReporting: Sendable {
     func logPaywallShown(placementKey: String?, paywallId: String?) async
+
+    /// The same report, returning the view id it generated (REV-252), so a
+    /// dismissal can be tied to the display it ended.
+    ///
+    /// Defaulted rather than added as a bare requirement: a reporter written
+    /// against the pre-REV-252 protocol keeps compiling, and its paywalls
+    /// still close — the close simply carries no view id, so it is recorded
+    /// without being paired.
+    func logPaywallDisplay(placementKey: String?, paywallId: String?) async -> String?
+
+    /// Reports that the customer dismissed the display `viewId` identifies.
+    /// Defaulted to a no-op for the same source-compatibility reason.
+    func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async
+}
+
+public extension RevnixPaywallViewReporting {
+    func logPaywallDisplay(placementKey: String?, paywallId: String?) async -> String? {
+        await logPaywallShown(placementKey: placementKey, paywallId: paywallId)
+        return nil
+    }
+
+    func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {}
 }
 
 extension RevnixClient: RevnixPaywallViewReporting {}
@@ -156,6 +178,7 @@ public struct RevnixPaywallView: View {
     private let onRestore: (() -> Void)?
     private let onTerms: (() -> Void)?
     private let onPrivacy: (() -> Void)?
+    private let onClose: (() -> Void)?
     private let themeOverride: RevnixPaywallTheme.Override?
     private let client: (any RevnixPaywallViewReporting)?
     private let placementKey: String?
@@ -164,12 +187,24 @@ public struct RevnixPaywallView: View {
 
     @State private var internalSelected: String?
     @State private var didReportView = false
+    /// The in-flight view beacon (REV-252). The close AWAITS this rather than
+    /// reading an id off a field: the id only exists once the beacon's request
+    /// returns, and a customer who dismisses in that window — a slow link, a
+    /// paywall they never meant to open — would otherwise report a close with
+    /// no id and lose the pairing.
+    @State private var viewReport: Task<String?, Never>?
     @Environment(\.openURL) private var openURL
 
     /// - Parameters:
     ///   - selectedPackageId: Controlled selection; omit to let the paywall
     ///     manage it (initial selection is the config's highlight package,
     ///     else the first package).
+    ///   - onClose: Dismissal (REV-252). The HOST performs it — only the app
+    ///     knows whether that means dismissing a sheet, popping a screen, or
+    ///     advancing onboarding — so the view never dismisses itself. Omit it
+    ///     and no close is drawn at all: a dead close button is worse than
+    ///     none. Passing `client` as well reports `paywall.closed` against
+    ///     this display's own view id.
     ///   - client: When given, the paywall reports one paywall.viewed per
     ///     appearance (REV-094); `placementKey`/`paywallId` are the
     ///     attribution attached to the report, and `disableViewTracking`
@@ -184,6 +219,7 @@ public struct RevnixPaywallView: View {
         onRestore: (() -> Void)? = nil,
         onTerms: (() -> Void)? = nil,
         onPrivacy: (() -> Void)? = nil,
+        onClose: (() -> Void)? = nil,
         theme: RevnixPaywallTheme.Override? = nil,
         client: (any RevnixPaywallViewReporting)? = nil,
         placementKey: String? = nil,
@@ -199,6 +235,7 @@ public struct RevnixPaywallView: View {
         self.onRestore = onRestore
         self.onTerms = onTerms
         self.onPrivacy = onPrivacy
+        self.onClose = onClose
         self.themeOverride = theme
         self.client = client
         self.placementKey = placementKey
@@ -337,6 +374,7 @@ public struct RevnixPaywallView: View {
                 onRestore: onRestore,
                 onTerms: onTerms,
                 onPrivacy: onPrivacy,
+                onClose: onClose.map { close in { reportCloseThen(close) } },
                 openURL: { url in openURL(url) }
             )
         )
@@ -358,7 +396,31 @@ public struct RevnixPaywallView: View {
             }
         }
         .background(theme.background.ignoresSafeArea())
+        .overlay(alignment: .topTrailing) { classicClose }
         .onAppear(perform: reportViewOnce)
+    }
+
+    /// The dismiss affordance the classic layouts get (REV-252).
+    ///
+    /// The nine `template` layouts have the same problem the designed ones had
+    /// — nothing on the screen closes them — and `onClose` is a parameter of
+    /// the shared view, so a host that wires it must get a close on either
+    /// path rather than silently nothing. Classic layouts author no elements
+    /// of their own, so there is never a design chip to suppress: the rule
+    /// reduces to "draw it whenever the host wired a handler".
+    @ViewBuilder private var classicClose: some View {
+        if let onClose {
+            Button { reportCloseThen(onClose) } label: {
+                Text(verbatim: "\u{00D7}")
+                    .font(.system(size: 17))
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(width: 30, height: 30)
+                    .background(theme.textPrimary.opacity(0.14), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+            .padding(14)
+        }
     }
 
     /// One view per appearance of this view identity: a re-presented paywall
@@ -371,8 +433,29 @@ public struct RevnixPaywallView: View {
         didReportView = true
         let placementKey = placementKey
         let paywallId = paywallId
+        viewReport = Task {
+            // A reporter that predates REV-252 answers nil; the close then
+            // still fires, it just cannot be paired with this display.
+            await client.logPaywallDisplay(placementKey: placementKey, paywallId: paywallId)
+        }
+    }
+
+    /// Runs the host's dismissal, reporting `paywall.closed` alongside it
+    /// (REV-252). The host's closure runs FIRST and unconditionally: the
+    /// beacon is best-effort, and an analytics failure must never be able to
+    /// trap the customer on the screen.
+    private func reportCloseThen(_ close: @escaping () -> Void) {
+        close()
+        guard let client, !disableViewTracking, let viewReport else { return }
+        let placementKey = placementKey
+        let paywallId = paywallId
         Task {
-            await client.logPaywallShown(placementKey: placementKey, paywallId: paywallId)
+            // Awaiting the view beacon is what keeps the pair intact when the
+            // customer dismisses before it lands. It has usually finished long
+            // ago, in which case this resumes immediately.
+            guard let viewId = await viewReport.value else { return }
+            await client.logPaywallClosed(
+                viewId: viewId, placementKey: placementKey, paywallId: paywallId)
         }
     }
 

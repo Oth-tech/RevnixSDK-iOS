@@ -311,9 +311,27 @@ public actor RevnixClient {
 
     /// Fire-and-forget impression beacon (feeds funnels + view conversions).
     public func logPaywallShown(placementKey: String?, paywallId: String?) async {
+        _ = await logPaywallDisplay(placementKey: placementKey, paywallId: paywallId)
+    }
+
+    /// The same beacon, returning the view id it generated (REV-252).
+    ///
+    /// Hand that id to `logPaywallClosed` when the customer dismisses THIS
+    /// display: the two events sharing one view id is what lets the ledger
+    /// pair a close with the display it ended, and the gap between their
+    /// timestamps is the customer's dwell on the screen. The id is returned
+    /// even when delivery fails — the caller's pairing must not depend on the
+    /// network, and the close beacon retries on its own key.
+    ///
+    /// Optional only to satisfy `RevnixPaywallViewReporting`, whose default
+    /// implementation has to be able to say "this reporter cannot pair".
+    /// RevnixClient always returns an id.
+    @discardableResult
+    public func logPaywallDisplay(placementKey: String?, paywallId: String?) async -> String? {
+        let viewId = UUID().uuidString.lowercased()
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
-            "viewId": .string(UUID().uuidString.lowercased()),
+            "viewId": .string(viewId),
             "sdkVersion": .string(Self.sdkVersion),
         ]
         if let v = placementKey { body["placementKey"] = .string(v) }
@@ -323,6 +341,27 @@ public actor RevnixClient {
         } catch {
             bgFailures += 1
             diagnostic(op: "logPaywallShown", message: "\(error)")
+        }
+        return viewId
+    }
+
+    /// Fire-and-forget dismissal beacon (REV-252) — the other half of a
+    /// display's life. Idempotent per view id, exactly like the view report.
+    ///
+    /// Pass the id `logPaywallDisplay` returned for this display.
+    public func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {
+        var body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "viewId": .string(viewId),
+            "sdkVersion": .string(Self.sdkVersion),
+        ]
+        if let v = placementKey { body["placementKey"] = .string(v) }
+        if let v = paywallId { body["paywallId"] = .string(v) }
+        do {
+            _ = try await request(path: "/v1/paywalls/closed", method: "POST", body: body)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "logPaywallClosed", message: "\(error)")
         }
     }
 
