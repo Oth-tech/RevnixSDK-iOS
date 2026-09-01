@@ -201,6 +201,70 @@ public struct PaywallConfig: Codable, Sendable, Equatable {
     public let offer: PaywallOffer?
     /// Absent (legacy config) = show all three footer links.
     public let footer: PaywallFooter?
+    /// A designed paywall: the block tree the dashboard's builder authored.
+    /// When present `RevnixPaywallView` renders THIS and the fields above act
+    /// as the fallback for apps on an SDK that predates block rendering — so
+    /// an older app keeps showing a sane classic screen instead of nothing.
+    public let blocks: PaywallBlockDoc?
+
+    /// Decoded by hand for one reason: `blocks` must never be able to fail the
+    /// whole config.
+    ///
+    /// The tree is authored by a dashboard that may be NEWER than this SDK,
+    /// and it arrives over the network. If a future field made the document
+    /// undecodable here, a synthesized initializer would throw and the app
+    /// would lose the paywall entirely — no design AND no classic fallback,
+    /// which is a screen the customer cannot buy from. `try?` degrades that to
+    /// "render the classic layout", which is always a working paywall.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        template = try c.decode(String.self, forKey: .template)
+        mode = try c.decodeIfPresent(String.self, forKey: .mode)
+        headline = try c.decode(String.self, forKey: .headline)
+        subheadline = try c.decodeIfPresent(String.self, forKey: .subheadline)
+        features = try c.decodeIfPresent([PaywallFeature].self, forKey: .features) ?? []
+        ctaLabel = try c.decode(String.self, forKey: .ctaLabel)
+        highlightPackageId = try c.decodeIfPresent(String.self, forKey: .highlightPackageId)
+        badgeText = try c.decodeIfPresent(String.self, forKey: .badgeText)
+        accent = try c.decodeIfPresent(String.self, forKey: .accent)
+        heroImageUrl = try c.decodeIfPresent(String.self, forKey: .heroImageUrl)
+        review = try c.decodeIfPresent(PaywallReview.self, forKey: .review)
+        offer = try c.decodeIfPresent(PaywallOffer.self, forKey: .offer)
+        footer = try c.decodeIfPresent(PaywallFooter.self, forKey: .footer)
+        blocks = try? c.decodeIfPresent(PaywallBlockDoc.self, forKey: .blocks)
+    }
+
+    public init(
+        template: String,
+        mode: String? = nil,
+        headline: String,
+        subheadline: String? = nil,
+        features: [PaywallFeature] = [],
+        ctaLabel: String,
+        highlightPackageId: String? = nil,
+        badgeText: String? = nil,
+        accent: String? = nil,
+        heroImageUrl: String? = nil,
+        review: PaywallReview? = nil,
+        offer: PaywallOffer? = nil,
+        footer: PaywallFooter? = nil,
+        blocks: PaywallBlockDoc? = nil
+    ) {
+        self.template = template
+        self.mode = mode
+        self.headline = headline
+        self.subheadline = subheadline
+        self.features = features
+        self.ctaLabel = ctaLabel
+        self.highlightPackageId = highlightPackageId
+        self.badgeText = badgeText
+        self.accent = accent
+        self.heroImageUrl = heroImageUrl
+        self.review = review
+        self.offer = offer
+        self.footer = footer
+        self.blocks = blocks
+    }
 }
 
 public struct PlacementPaywall: Codable, Sendable, Equatable {
