@@ -11,7 +11,10 @@ let package = Package(
         .target(name: "Revnix", path: "Sources/Revnix"),
         .testTarget(
             name: "RevnixTests", dependencies: ["Revnix"], path: "Tests/RevnixTests",
-            resources: [.copy("Resources/Revnix.storekit")]
+            resources: [
+                .copy("Resources/Revnix.storekit"),
+                .copy("Resources/paywall-background-wire.json"),
+            ]
         ),
     ]
 )

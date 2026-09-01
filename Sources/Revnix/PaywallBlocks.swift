@@ -514,9 +514,12 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
     /// "canvas" designs are authored against a fixed device screen and scale
     /// as a whole; "flow" designs lay out in a scrolling column.
     public var layout: String?
-    /// Any color or gradient string — or the layered form with a photo and a
-    /// scrim, whose ground color is what this SDK paints.
+    /// The ground paint — a color or a CSS gradient string. Kept flat because
+    /// it is what `@bg` resolves against and what every unedited paywall has.
     public var background: String
+    /// The background exactly as published, so the photo and scrim layers can
+    /// be resolved. Nil for a document whose background is a plain string.
+    public var backgroundSpec: RevnixJSONValue?
     public var textColor: String
     public var accent: String
     public var accentInk: String
@@ -549,20 +552,15 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
         version = ((try? c.decodeIfPresent(Int.self, forKey: .version)) as? Int) ?? 1
         layout = try? c.decodeIfPresent(String.self, forKey: .layout)
         // `background` is a plain string in the original form and an object in
-        // the layered one; both reduce to the ground color this SDK paints.
-        if let s = try? c.decodeIfPresent(String.self, forKey: .background) {
-            background = s
-        } else if let layered = try? c.nestedContainer(keyedBy: GroundKey.self, forKey: .background),
-                  let ground = try? layered.decodeIfPresent(String.self, forKey: .ground) {
-            background = ground
-        } else {
-            background = "#000000"
-        }
+        // the layered one. The object's ground field is `color` — `ground` is
+        // the name of the RESOLVED layer, and reading that off the wire is what
+        // used to paint every edited paywall black.
+        let spec = try? c.decodeIfPresent(RevnixJSONValue.self, forKey: .background)
+        backgroundSpec = spec
+        background = revnixBackgroundGround(spec) ?? "#000000"
         textColor = ((try? c.decodeIfPresent(String.self, forKey: .textColor)) as? String) ?? "#FFFFFF"
         accent = ((try? c.decodeIfPresent(String.self, forKey: .accent)) as? String) ?? "#6478ff"
         accentInk = ((try? c.decodeIfPresent(String.self, forKey: .accentInk)) as? String) ?? "#FFFFFF"
         fontFamily = try? c.decodeIfPresent(String.self, forKey: .fontFamily)
     }
-
-    private enum GroundKey: String, CodingKey { case ground }
 }
