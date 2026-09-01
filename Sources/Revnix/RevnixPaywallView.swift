@@ -265,6 +265,22 @@ public struct RevnixPaywallView: View {
             .packageId ?? shown.first?.packageId
     }
 
+    /// A designed paywall renders every package — the design's own layout
+    /// decides what to show, and `template` plays no part in it — so its
+    /// selection resolves against `packages` rather than the template-filtered
+    /// `shown`. Resolving against `shown` would silently drop a tap on any
+    /// card the classic "minimal" filter happens to exclude.
+    private var blockSelectedId: String? {
+        if let controlled = selectedPackageId { return controlled }
+        if let internalSelected,
+            packages.contains(where: { $0.packageId == internalSelected })
+        {
+            return internalSelected
+        }
+        return packages.first { $0.packageId == config.highlightPackageId }?
+            .packageId ?? packages.first?.packageId
+    }
+
     private func select(_ packageId: String) {
         internalSelected = packageId
         onSelectPackage?(packageId)
@@ -312,11 +328,12 @@ public struct RevnixPaywallView: View {
             ctx: BlockContext(
                 doc: blockDoc,
                 packages: packages,
-                selectedPackageId: selectedId,
+                selectedPackageId: blockSelectedId,
                 heroImageUrl: config.heroImageUrl,
                 footerTermsUrl: config.footer?.termsUrl,
                 footerPrivacyUrl: config.footer?.privacyUrl,
                 onPurchase: { id in if !loading { onPurchase(id) } },
+                onSelect: { id in select(id) },
                 onRestore: onRestore,
                 onTerms: onTerms,
                 onPrivacy: onPrivacy,

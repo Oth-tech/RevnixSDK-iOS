@@ -309,6 +309,9 @@ struct BlockContext {
     let footerTermsUrl: String?
     let footerPrivacyUrl: String?
     let onPurchase: (String) -> Void
+    /// Reports a plan card tap. Selection is the paywall's own state, so a
+    /// design's plan cards work without the host wiring anything.
+    let onSelect: (String) -> Void
     let onRestore: (() -> Void)?
     let onTerms: (() -> Void)?
     let onPrivacy: (() -> Void)?
@@ -562,6 +565,27 @@ private struct LinksBlockView: View {
     }
 }
 
+/// Makes a card its package's selection target. A card that names no package
+/// is decoration and installs no gesture at all, so it never swallows a tap
+/// meant for the screen behind it.
+private struct SelectOnTap: ViewModifier {
+    let packageId: String?
+    let onSelect: (String) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let packageId {
+            // The whole card is the target, not just its glyphs — a plan row
+            // is mostly padding. A child Button still wins the tap.
+            content
+                .contentShape(Rectangle())
+                .onTapGesture { onSelect(packageId) }
+        } else {
+            content
+        }
+    }
+}
+
 private struct ProductsBlockView: View {
     let block: ProductsBlock
     let ctx: BlockContext
@@ -615,6 +639,10 @@ private struct ProductsBlockView: View {
             }
         }
         .revnixBlockStyle(highlighted ? block.highlightStyle : block.cardStyle, doc)
+        // The whole card is the target, not just its glyphs — a plan row is
+        // mostly padding, and tapping the gap beside the price must select.
+        .contentShape(Rectangle())
+        .onTapGesture { ctx.onSelect(pkg.packageId) }
     }
 
     /// A template that resolves to nothing useful falls back to the plain
@@ -641,7 +669,7 @@ private struct CardBlockView: View {
             // single instance still renders, so the design stays visible.
             let list: [RevnixPaywallPackage?] = ctx.packages.isEmpty ? [nil] : ctx.packages.map { $0 }
             ForEach(Array(list.enumerated()), id: \.offset) { _, pkg in
-                container(for: pkg, style: styleFor(pkg))
+                container(for: pkg, style: styleFor(pkg), selects: pkg?.packageId)
             }
         } else if let index = block.packageIndex, index >= ctx.packages.count {
             // A card that names a package the offering does not reach is
@@ -649,7 +677,14 @@ private struct CardBlockView: View {
             EmptyView()
         } else {
             let ctxPackage = block.packageIndex.flatMap { ctx.packages.indices.contains($0) ? ctx.packages[$0] : nil }
-            container(for: ctxPackage ?? package, style: block.style)
+            // A card pinned to a package doubles as its selection target —
+            // that is how hand-styled plan rows (a highlighted annual beside
+            // a plain monthly) become tappable without a products block. It
+            // takes `selectedStyle` when selected for the same reason a
+            // repeated card does, or tapping it would change what the CTA
+            // buys with no visible answer. A card that names no package is
+            // decoration and stays inert.
+            container(for: ctxPackage ?? package, style: styleFor(ctxPackage), selects: ctxPackage?.packageId)
         }
     }
 
@@ -660,7 +695,11 @@ private struct CardBlockView: View {
     }
 
     @ViewBuilder
-    private func container(for pkg: RevnixPaywallPackage?, style: BlockStyle?) -> some View {
+    private func container(
+        for pkg: RevnixPaywallPackage?,
+        style: BlockStyle?,
+        selects packageId: String? = nil
+    ) -> some View {
         let kind = block.layout ?? "column"
         let spacing = block.style?.gap ?? 10
         let children = block.children
@@ -689,6 +728,7 @@ private struct CardBlockView: View {
             }
         }
         .revnixBlockStyle(style, ctx.doc, inStack: inStack)
+        .modifier(SelectOnTap(packageId: packageId, onSelect: ctx.onSelect))
     }
 
     @ViewBuilder
