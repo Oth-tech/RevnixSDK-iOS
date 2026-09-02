@@ -553,6 +553,89 @@ final class RevnixClientTests: XCTestCase {
             PlacementExperiment(key: "summer-pricing", variantId: "var_b"))
     }
 
+    // MARK: - Raw wire passthrough (bridges that render the paywall themselves)
+
+    static let designedPlacementBody = """
+        {"status":"ok","placementKey":"main","revision":5,"offering":{"offeringId":"off_3","displayName":"Designed","packages":[{"packageId":"pkg_3","productId":"pro.yearly"}]},"paywall":{"paywallId":"pw_1","name":"Main","config":{"template":"focus","headline":"Unlock","ctaLabel":"Go","blocks":{"version":1,"layout":"flow","blocks":[{"type":"hologram","spin":3}]},"futureField":"kept"}},"experiment":{"key":"summer-pricing","variantId":"var_b"}}
+        """
+
+    /// `paywallJSON` / `experimentJSON` are the wire values untouched: a block
+    /// type and a config field this SDK does not know survive there, while the
+    /// typed `paywall` still decodes beside them.
+    func testRawPaywallAndExperimentSurviveBesideTheTypedViews() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.designedPlacementBody)
+        let client = makeClient()
+        let resolution = try await client.resolvePlacement("main")
+
+        XCTAssertEqual(resolution.paywall?.paywallId, "pw_1")
+        guard case .object(let paywall)? = resolution.paywallJSON,
+            case .object(let config)? = paywall["config"],
+            case .object(let blocks)? = config["blocks"],
+            case .array(let items)? = blocks["blocks"],
+            case .object(let item)? = items.first
+        else { return XCTFail("paywallJSON should mirror the wire document") }
+        XCTAssertEqual(config["futureField"], .string("kept"))
+        XCTAssertEqual(item["type"], .string("hologram"))
+        XCTAssertEqual(
+            resolution.experimentJSON,
+            .object(["key": .string("summer-pricing"), "variantId": .string("var_b")]))
+    }
+
+    /// The raw copy is what the offline cache stores, so a cached resolution
+    /// hands a bridge the same document the live one did.
+    func testRawPaywallRoundTripsThroughThePlacementCache() async throws {
+        StubProtocol.respondOnce(
+            containing: "/placements", status: 200, body: Self.designedPlacementBody)
+        StubProtocol.failWithConnectionError(containing: "/placements")
+        let client = makeClient()
+        let live = try await client.resolvePlacement("main")
+        let cached = try await client.resolvePlacement("main")
+        XCTAssertEqual(cached.paywallJSON, live.paywallJSON)
+        XCTAssertEqual(cached.experimentJSON, live.experimentJSON)
+        XCTAssertEqual(cached.paywall, live.paywall)
+    }
+
+    /// A paywall the typed model cannot read (here: no `headline` /
+    /// `ctaLabel`, and an experiment missing `variantId`) must not fail the
+    /// resolution — the offering and the raw copies still arrive, the typed
+    /// views are simply nil. Same rule `PaywallConfig` applies to `blocks`.
+    func testUntypeablePaywallStillDeliversTheOfferingAndRawCopies() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 200,
+            body: """
+                {"status":"ok","placementKey":"main","revision":6,"offering":{"offeringId":"off_4","displayName":"Blocks only","packages":[{"packageId":"pkg_4","productId":"pro.weekly"}]},"paywall":{"paywallId":"pw_2","name":"Next","config":{"template":"canvas","blocks":{"version":2,"layout":"grid","blocks":[]}}},"experiment":{"key":"k"}}
+                """)
+        let client = makeClient()
+        let resolution = try await client.resolvePlacement("main")
+        XCTAssertEqual(resolution.offering.offeringId, "off_4")
+        XCTAssertNil(resolution.paywall)
+        XCTAssertNil(resolution.experiment)
+        guard case .object(let paywall)? = resolution.paywallJSON else {
+            return XCTFail("raw paywall should survive an untypeable config")
+        }
+        XCTAssertEqual(paywall["paywallId"], .string("pw_2"))
+        XCTAssertEqual(resolution.experimentJSON, .object(["key": .string("k")]))
+    }
+
+    /// No paywall and no experiment on the wire → both raw copies are nil,
+    /// whether the keys are null or missing.
+    func testRawCopiesAreNilWhenTheWireHasNone() async throws {
+        StubProtocol.respondOnce(
+            containing: "/placements", status: 200,
+            body: """
+                {"status":"ok","placementKey":"main","revision":1,"offering":{"offeringId":"off_1","displayName":"Default","packages":[]},"paywall":null,"experiment":null}
+                """)
+        StubProtocol.respond(containing: "/placements", status: 200, body: Self.placementBody)
+        let client = makeClient()
+        let nullCase = try await client.resolvePlacement("main")
+        XCTAssertNil(nullCase.paywallJSON)
+        XCTAssertNil(nullCase.experimentJSON)
+        let absentCase = try await client.resolvePlacement("main")
+        XCTAssertNil(absentCase.paywallJSON)
+        XCTAssertNil(absentCase.experimentJSON)
+    }
+
     // MARK: - Diagnostics (spec: "REV-200 diagnostics")
 
     func testBackgroundFailureReachesDiagnosticsAndRidesTheNextRequestHeader() async throws {

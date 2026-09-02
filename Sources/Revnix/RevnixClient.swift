@@ -275,10 +275,11 @@ public actor RevnixClient {
                 path: "/v1/placements/\(encode(key))/offering", method: "GET",
                 query: [URLQueryItem(name: "customer", value: customerId())])
             let resolution = try decode(PlacementResolution.self, from: data)
-            if let encoded = try? String(
-                data: JSONEncoder().encode(resolution), encoding: .utf8)
-            {
-                config.storage.set(Keys.placement(key), encoded)
+            // Cache the wire bytes themselves (as revnix-kotlin does), not a
+            // re-encode: offline then sees exactly the document the server
+            // sent, including whatever this SDK version does not type.
+            if let wire = String(data: data, encoding: .utf8) {
+                config.storage.set(Keys.placement(key), wire)
             }
             return resolution
         } catch let err as RevnixError where err.isRetryable {
