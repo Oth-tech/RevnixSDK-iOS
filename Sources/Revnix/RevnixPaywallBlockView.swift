@@ -142,11 +142,12 @@ func revnixBlockColor(_ value: String?, _ doc: PaywallBlockDoc) -> Color? {
         switch name {
         case "accent": raw = doc.accent
         case "accentInk": raw = doc.accentInk
-        // The raw ground, gradient and all — exactly what the dashboard
-        // answers `@bg` with. A gradient is not a colour, so the initialiser
-        // below returns nil and the caller keeps its own default, which is
-        // what the builder shows for a `@bg` tint over a gradient.
-        case "bg": raw = doc.background
+        // The ground's FLAT base colour, which is what the dashboard answers
+        // `@bg` with: it feeds the token into `color-mix()`, which cannot take
+        // a gradient, so it collapses a gradient ground to one colour first.
+        // Handing the raw gradient here instead made every `@bg` tint over a
+        // gradient background resolve to nil and paint nothing.
+        case "bg": raw = revnixBackgroundBaseColor(doc.background)
         case "text": raw = doc.textColor
         default: return nil
         }
@@ -156,10 +157,18 @@ func revnixBlockColor(_ value: String?, _ doc: PaywallBlockDoc) -> Color? {
 }
 
 extension Color {
-    /// Parses "#rgb", "#rrggbb", "#rrggbbaa" and "rgb()/rgba()". A gradient or
-    /// a named colour returns nil — the caller falls back rather than guessing.
+    /// Parses "#rgb", "#rrggbb", "#rrggbbaa", "rgb()/rgba()" and `transparent`.
+    /// A gradient or any other named colour returns nil — the caller falls back
+    /// rather than guessing.
     init?(revnixBlockHex value: String) {
         var s = value.trimmingCharacters(in: .whitespaces)
+        // `transparent` appears in the shipped designs' gradient stops.
+        // Rejecting it dropped the stop, and a gradient left with one stop does
+        // not parse at all, so the whole fill was lost.
+        if s.caseInsensitiveCompare("transparent") == .orderedSame {
+            self = Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 0)
+            return
+        }
         if s.hasPrefix("#") {
             s.removeFirst()
             if s.count == 3 || s.count == 4 { s = s.map { "\($0)\($0)" }.joined() }
@@ -186,6 +195,127 @@ extension Color {
     }
 }
 
+// MARK: - Fills
+
+/// What a `fill` (or any other paint string) resolves to.
+///
+/// The dashboard hands `fill` straight to CSS `background`, which takes a
+/// colour *or* a gradient *or* a stack of them. Native has no such union, so
+/// the two cases are separated here and painted by `RevnixFillView`.
+enum RevnixBlockFill {
+    case color(Color)
+    /// Gradient layers BOTTOM FIRST, and NOTHING under them.
+    ///
+    /// The flat colour a gradient collapses to belongs only to the case where
+    /// the gradient cannot be drawn. Painting it underneath one that CAN be
+    /// drawn makes the box opaque, and 83 of the library's 139 gradient fills
+    /// are scrims that fade through a translucent stop — they are drawn over
+    /// the screen's photo precisely so it shows through.
+    case gradients([RevnixGradient])
+}
+
+/// Resolves a paint string the way the dashboard's CSS `background` does.
+///
+/// Order matters: a plain colour is tried first (it is the overwhelmingly
+/// common case and the cheap one), then the gradient forms, and only then the
+/// fallback. Returning nil means "paint nothing", which is what an absent
+/// `fill` has always meant.
+///
+/// Nothing here fails silently any more. A `fill` the design set but this SDK
+/// cannot parse collapses to the first colour literal in the string — a colour
+/// FROM THE DESIGN, never black — and reports through `onDiagnostic` so the
+/// host can see the form its paywall used and we did not.
+func revnixBlockFill(
+    _ value: String?,
+    _ doc: PaywallBlockDoc,
+    onDiagnostic: ((String) -> Void)? = nil
+) -> RevnixBlockFill? {
+    guard let raw = value?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+    if let flat = revnixBlockColor(raw, doc) { return .color(flat) }
+
+    let layers = revnixParseCssGradients(raw, isColor: { revnixBlockColor($0, doc) != nil })
+    if !layers.isEmpty { return .gradients(layers) }
+
+    // Neither a colour nor a gradient this build knows. Take a colour out of
+    // the string rather than leaving the box unpainted or, worse, black.
+    onDiagnostic?("unreadable fill \(raw)")
+    // A pattern paints nothing rather than a stripe colour spread over the box.
+    if revnixIsRepeatingPattern(raw) { return nil }
+    return revnixBlockColor(revnixBackgroundBaseColor(raw), doc).map { .color($0) }
+}
+
+/// The flat colour a parsed gradient stack stands in for: the first stop of
+/// the BOTTOM layer that is not fully transparent. Matches
+/// `revnixBackgroundBaseColor`, but reads the parsed stops rather than the
+/// source text, so a stop written as a palette token resolves too.
+func revnixGradientBaseColor(_ layers: [RevnixGradient], _ doc: PaywallBlockDoc) -> Color? {
+    guard let bottom = layers.first else { return nil }
+    // The alpha is read off the RESOLVED stop rather than its source text, so a
+    // stop written `@accent/0` counts as transparent exactly as `#6478ff00`
+    // does — the text-only test called the token opaque and answered a border
+    // with an invisible colour.
+    var first: Color?
+    for stop in bottom.stops {
+        guard let resolved = revnixBlockColor(stop.color, doc) else { continue }
+        if first == nil { first = resolved }
+        if !revnixIsFullyTransparentStop(stop.color, doc) { return resolved }
+    }
+    return first
+}
+
+/// Whether a stop resolves to nothing visible. Palette tokens carry their alpha
+/// in the token (`@accent/0`), so the source text alone cannot answer this.
+private func revnixIsFullyTransparentStop(_ color: String, _ doc: PaywallBlockDoc) -> Bool {
+    if color.hasPrefix("@") {
+        let parts = color.dropFirst().split(separator: "/", maxSplits: 1)
+        if parts.count == 2, let pct = Double(parts[1]) { return pct <= 0 }
+        return false
+    }
+    return revnixIsFullyTransparent(color)
+}
+
+/// A field that can only ever be ONE colour — a border, text, a shadow.
+///
+/// A gradient in such a field has no native equivalent (and no CSS one either:
+/// `border-color` takes no gradient, so the dashboard drops the whole
+/// declaration). Collapsing it to the colour it stands for keeps the stroke or
+/// the text visible, which is closer to the design's intent than losing it.
+func revnixBlockStrokeColor(
+    _ value: String?,
+    _ doc: PaywallBlockDoc,
+    onDiagnostic: ((String) -> Void)? = nil
+) -> Color? {
+    guard let raw = value?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+    if let flat = revnixBlockColor(raw, doc) { return flat }
+    let layers = revnixParseCssGradients(raw, isColor: { revnixBlockColor($0, doc) != nil })
+    if let base = revnixGradientBaseColor(layers, doc) {
+        onDiagnostic?("gradient flattened in a colour-only field: \(raw)")
+        return base
+    }
+    onDiagnostic?("unreadable colour \(raw)")
+    return revnixBlockColor(revnixBackgroundBaseColor(raw), doc)
+}
+
+/// Paints a resolved fill: the flat colour, or the gradient layers stacked
+/// over it in the order `revnixParseCssGradients` returns them (bottom first).
+struct RevnixFillView: View {
+    let fill: RevnixBlockFill
+    let doc: PaywallBlockDoc
+
+    var body: some View {
+        switch fill {
+        case let .color(colour):
+            colour
+        case let .gradients(layers):
+            ZStack {
+                ForEach(Array(layers.enumerated()), id: \.offset) { _, gradient in
+                    RevnixGradientView(gradient: gradient, doc: doc)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Style application
 
 /// Applies a BlockStyle to a view.
@@ -198,6 +328,9 @@ private struct BlockStyleModifier: ViewModifier {
     let doc: PaywallBlockDoc
     /// Stack children position themselves; elsewhere the offsets are inert.
     let inStack: Bool
+    /// Where a paint string this build cannot read is reported. Nil when the
+    /// host wired no diagnostics, which is the only case that stays silent.
+    let onDiagnostic: ((String) -> Void)?
 
     func body(content: Content) -> some View {
         guard let s = style else { return AnyView(content) }
@@ -225,15 +358,20 @@ private struct BlockStyleModifier: ViewModifier {
         // has to a fraction of the parent without measuring it.
         if s.width?.fraction != nil { view = AnyView(view.frame(maxWidth: .infinity)) }
 
-        if let fill = revnixBlockColor(s.fill, doc) {
-            view = AnyView(view.background(fill))
+        // The painted surface. A gradient reaches here as the CSS string the
+        // dashboard put in `background`; it is parsed into the same layers the
+        // screen background uses, so a gradient-filled card, badge or button
+        // paints as designed instead of staying blank.
+        if let fill = revnixBlockFill(s.fill, doc, onDiagnostic: onDiagnostic) {
+            view = AnyView(view.background(RevnixFillView(fill: fill, doc: doc)))
         }
         if let radius = s.radius {
             // 9999 is the designs' "fully round" idiom.
             view = AnyView(view.clipShape(RoundedRectangle(cornerRadius: min(radius, 999))))
         }
         if let width = s.borderWidth ?? (s.borderColor != nil ? 1 : nil) {
-            let colour = revnixBlockColor(s.borderColor, doc) ?? revnixBlockColor(doc.textColor, doc) ?? .primary
+            let colour = revnixBlockStrokeColor(s.borderColor, doc, onDiagnostic: onDiagnostic)
+                ?? revnixBlockColor(doc.textColor, doc) ?? .primary
             view = AnyView(view.overlay(
                 RoundedRectangle(cornerRadius: min(s.radius ?? 0, 999)).strokeBorder(colour, lineWidth: width)
             ))
@@ -281,7 +419,7 @@ private struct BlockStyleModifier: ViewModifier {
     private func borderColour(_ spec: String) -> Color? {
         let parts = spec.split(separator: " ", maxSplits: 2).map(String.init)
         guard parts.count == 3 else { return nil }
-        return revnixBlockColor(parts[2], doc)
+        return revnixBlockStrokeColor(parts[2], doc, onDiagnostic: onDiagnostic)
     }
 
     private func borderWidth(_ spec: String) -> CGFloat {
@@ -291,8 +429,13 @@ private struct BlockStyleModifier: ViewModifier {
 }
 
 private extension View {
-    func revnixBlockStyle(_ style: BlockStyle?, _ doc: PaywallBlockDoc, inStack: Bool = false) -> some View {
-        modifier(BlockStyleModifier(style: style, doc: doc, inStack: inStack))
+    func revnixBlockStyle(
+        _ style: BlockStyle?,
+        _ doc: PaywallBlockDoc,
+        inStack: Bool = false,
+        diagnostic: ((String) -> Void)? = nil
+    ) -> some View {
+        modifier(BlockStyleModifier(style: style, doc: doc, inStack: inStack, onDiagnostic: diagnostic))
     }
 }
 
@@ -319,6 +462,10 @@ struct BlockContext {
     /// drawn at all — a dead close button is worse than none.
     let onClose: (() -> Void)?
     let openURL: (URL) -> Void
+    /// Where the renderer reports a paint string it could not read. The screen
+    /// still draws — a fill falls back to a colour from the design — but the
+    /// host gets told, which is what a silent black screen never did.
+    var onDiagnostic: ((String) -> Void)?
 }
 
 /// Makes an element the paywall's dismiss target when the design marks it as
@@ -359,8 +506,8 @@ struct BlockView: View {
         switch block {
         case let .text(b):
             Text(revnixResolveTags(b.text, package: package, all: ctx.packages))
-                .modifier(TextStyling(style: b.style, doc: doc))
-                .revnixBlockStyle(b.style, doc, inStack: inStack)
+                .modifier(TextStyling(style: b.style, doc: doc, onDiagnostic: ctx.onDiagnostic))
+                .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
                 .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
 
         case let .image(b):
@@ -373,7 +520,7 @@ struct BlockView: View {
                     HStack(alignment: .top, spacing: 9) {
                         Text(item.icon ?? "✓")
                             .fontWeight(.heavy)
-                            .foregroundStyle(revnixBlockColor(b.iconColor, doc)
+                            .foregroundStyle(revnixBlockStrokeColor(b.iconColor, doc, onDiagnostic: ctx.onDiagnostic)
                                 ?? revnixBlockColor(doc.accent, doc) ?? .accentColor)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.title).fontWeight(item.description == nil ? .medium : .bold)
@@ -385,11 +532,11 @@ struct BlockView: View {
                     }
                 }
             }
-            .revnixBlockStyle(b.style, doc, inStack: inStack)
+            .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .products(b):
             ProductsBlockView(block: b, ctx: ctx)
-                .revnixBlockStyle(b.style, doc, inStack: inStack)
+                .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .button(b):
             // A button the design marks as the close dismisses instead of
@@ -397,6 +544,14 @@ struct BlockView: View {
             // accented thing on the screen, or a "Not now" competes with
             // "Subscribe" for the eye.
             let closesPaywall = b.action == .close && ctx.onClose != nil
+            // `strippedBox` hands the box back to us, so the fill is resolved
+            // here rather than by the style modifier — which is why a gradient
+            // CTA used to flatten to the plain accent.
+            let buttonFill: RevnixBlockFill =
+                revnixBlockFill(b.style?.fill, doc, onDiagnostic: ctx.onDiagnostic)
+                    ?? .color(closesPaywall
+                        ? .clear
+                        : (revnixBlockColor(doc.accent, doc) ?? .accentColor))
             Button {
                 if closesPaywall {
                     ctx.onClose?()
@@ -405,29 +560,32 @@ struct BlockView: View {
                 }
             } label: {
                 Text(revnixResolveTags(b.label, package: package, all: ctx.packages))
-                    .modifier(TextStyling(style: b.style, doc: doc, defaultWeight: .heavy, defaultSize: 15))
+                    .modifier(TextStyling(style: b.style, doc: doc, defaultWeight: .heavy, defaultSize: 15, onDiagnostic: ctx.onDiagnostic))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, b.style?.height == nil ? 15 : 0)
                     .padding(.horizontal, 16)
                     .frame(height: b.style?.height?.points.map { CGFloat($0) })
-                    .background(closesPaywall ? Color.clear : (revnixBlockColor(doc.accent, doc) ?? .accentColor))
+                    .background(RevnixFillView(fill: buttonFill, doc: doc))
                     .foregroundStyle(closesPaywall
                         ? (revnixBlockColor(doc.textColor, doc) ?? .primary)
                         : (revnixBlockColor(doc.accentInk, doc) ?? .white))
                     .clipShape(RoundedRectangle(cornerRadius: b.style?.radius ?? 12))
             }
             .buttonStyle(.plain)
-            .revnixBlockStyle(strippedBox(b.style), doc, inStack: inStack)
+            .revnixBlockStyle(strippedBox(b.style), doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .links(b):
             LinksBlockView(block: b, ctx: ctx)
-                .revnixBlockStyle(b.style, doc, inStack: inStack)
+                .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .line(b):
-            Rectangle()
-                .fill(revnixBlockColor(b.style?.fill, doc) ?? (revnixBlockColor(doc.textColor, doc) ?? .primary).opacity(0.16))
-                .frame(height: b.style?.height?.points ?? 1)
-                .revnixBlockStyle(strippedBox(b.style), doc, inStack: inStack)
+            RevnixFillView(
+                fill: revnixBlockFill(b.style?.fill, doc, onDiagnostic: ctx.onDiagnostic)
+                    ?? .color((revnixBlockColor(doc.textColor, doc) ?? .primary).opacity(0.16)),
+                doc: doc
+            )
+            .frame(height: b.style?.height?.points ?? 1)
+                .revnixBlockStyle(strippedBox(b.style), doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .spacer(b):
             if b.flex == true {
@@ -462,13 +620,14 @@ private struct TextStyling: ViewModifier {
     let doc: PaywallBlockDoc
     var defaultWeight: Font.Weight = .regular
     var defaultSize: CGFloat = 15
+    var onDiagnostic: ((String) -> Void)?
 
     func body(content: Content) -> some View {
         let size = CGFloat(style?.fontSize ?? Double(defaultSize))
         var view = AnyView(
             content
                 .font(font(size: size))
-                .foregroundStyle(revnixBlockColor(style?.textColor, doc)
+                .foregroundStyle(revnixBlockStrokeColor(style?.textColor, doc, onDiagnostic: onDiagnostic)
                     ?? revnixBlockColor(doc.textColor, doc) ?? .primary)
         )
         // CSS letter-spacing is em; SwiftUI tracking is points.
@@ -540,7 +699,7 @@ private struct ImageBlockView: View {
         .frame(height: sized ? nil : 160)
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: radius))
-        .revnixBlockStyle(block.style, ctx.doc, inStack: inStack)
+        .revnixBlockStyle(block.style, ctx.doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
     }
 
     private var slot: some View {
@@ -677,7 +836,7 @@ private struct ProductsBlockView: View {
                     .offset(x: -12, y: -9)
             }
         }
-        .revnixBlockStyle(highlighted ? block.highlightStyle : block.cardStyle, doc)
+        .revnixBlockStyle(highlighted ? block.highlightStyle : block.cardStyle, doc, diagnostic: ctx.onDiagnostic)
         // The whole card is the target, not just its glyphs — a plan row is
         // mostly padding, and tapping the gap beside the price must select.
         .contentShape(Rectangle())
@@ -766,7 +925,7 @@ private struct CardBlockView: View {
                 }
             }
         }
-        .revnixBlockStyle(style, ctx.doc, inStack: inStack)
+        .revnixBlockStyle(style, ctx.doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
         .modifier(SelectOnTap(packageId: packageId, onSelect: ctx.onSelect))
     }
 

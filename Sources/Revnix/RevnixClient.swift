@@ -13,7 +13,10 @@ import Foundation
 ///   `source:token:transactionId` and drain idempotently (the server dedupes
 ///   on the shared purchaseKey).
 public actor RevnixClient {
-    private let config: RevnixConfig
+    /// `nonisolated` so the synchronous render-diagnostic hook can reach the
+    /// host's sink without hopping onto the actor: RevnixConfig is Sendable
+    /// and this is a `let`, so there is nothing here to race on.
+    private nonisolated let config: RevnixConfig
     private let session: URLSession
 
     private static let expiryGraceMs = 3 * 24 * 3600 * 1000
@@ -564,8 +567,15 @@ public actor RevnixClient {
         persistQueue(items)
     }
 
-    private func diagnostic(op: String, message: String) {
+    private nonisolated func diagnostic(op: String, message: String) {
         config.onDiagnostic?(RevnixDiagnostic(op: op, message: message))
+    }
+
+    /// A block paywall reporting a paint string it could not read. Routed to
+    /// the same sink as every other swallowed failure, so a host that already
+    /// wired `onDiagnostic` needs no new wiring to see render fallbacks.
+    public nonisolated func reportRenderDiagnostic(_ message: String) {
+        diagnostic(op: "paywall.render", message: message)
     }
 
     private func encode(_ segment: String) -> String {
