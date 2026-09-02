@@ -151,9 +151,19 @@ public protocol RevnixPaywallViewReporting: Sendable {
     /// Reports that the customer dismissed the display `viewId` identifies.
     /// Defaulted to a no-op for the same source-compatibility reason.
     func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async
+
+    /// Reports a paint string the block renderer could not read.
+    ///
+    /// Local only — it never leaves the device. The renderer keeps drawing (an
+    /// unreadable fill falls back to a colour from the design), so this is the
+    /// only way a host learns that a paywall is rendering approximately.
+    /// Defaulted so a reporter written before this method keeps compiling.
+    func reportRenderDiagnostic(_ message: String)
 }
 
 public extension RevnixPaywallViewReporting {
+    func reportRenderDiagnostic(_ message: String) {}
+
     func logPaywallDisplay(placementKey: String?, paywallId: String?) async -> String? {
         await logPaywallShown(placementKey: placementKey, paywallId: paywallId)
         return nil
@@ -184,6 +194,9 @@ public struct RevnixPaywallView: View {
     private let placementKey: String?
     private let paywallId: String?
     private let disableViewTracking: Bool
+    /// An explicit sink for render diagnostics, for a host that renders
+    /// without passing `client`. When both are given both are called.
+    private let onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)?
 
     @State private var internalSelected: String?
     @State private var didReportView = false
@@ -224,7 +237,8 @@ public struct RevnixPaywallView: View {
         client: (any RevnixPaywallViewReporting)? = nil,
         placementKey: String? = nil,
         paywallId: String? = nil,
-        disableViewTracking: Bool = false
+        disableViewTracking: Bool = false,
+        onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil
     ) {
         self.config = config
         self.packages = packages
@@ -241,6 +255,7 @@ public struct RevnixPaywallView: View {
         self.placementKey = placementKey
         self.paywallId = paywallId
         self.disableViewTracking = disableViewTracking
+        self.onDiagnostic = onDiagnostic
     }
 
     // MARK: Resolved config
@@ -375,10 +390,24 @@ public struct RevnixPaywallView: View {
                 onTerms: onTerms,
                 onPrivacy: onPrivacy,
                 onClose: onClose.map { close in { reportCloseThen(close) } },
-                openURL: { url in openURL(url) }
+                openURL: { url in openURL(url) },
+                onDiagnostic: renderDiagnostic
             )
         )
         .onAppear(perform: reportViewOnce)
+    }
+
+    /// The renderer's diagnostic sink, or nil when the host wired neither a
+    /// client nor a callback — in which case building a message per unreadable
+    /// value would be pure waste, and the nil is what suppresses it.
+    private var renderDiagnostic: ((String) -> Void)? {
+        guard client != nil || onDiagnostic != nil else { return nil }
+        let client = client
+        let explicit = onDiagnostic
+        return { message in
+            client?.reportRenderDiagnostic(message)
+            explicit?(RevnixDiagnostic(op: "paywall.render", message: message))
+        }
     }
 
     private var classicBody: some View {

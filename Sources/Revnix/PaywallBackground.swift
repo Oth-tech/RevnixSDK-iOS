@@ -154,10 +154,9 @@ public func revnixBackgroundLayers(
 /// stack over their base, not with the base itself. Fully transparent stops
 /// are skipped for the same reason.
 ///
-/// This is NOT what `@bg` resolves to. The dashboard answers that token with
-/// the raw ground, which `color-mix()` cannot take when it is a gradient, so a
-/// `@bg` tint over a gradient renders nothing in the builder — and must render
-/// nothing here too, or the device stops matching the design.
+/// This is ALSO what `@bg` resolves to: the dashboard feeds that token into
+/// `color-mix()`, which cannot take a gradient, so it collapses a gradient ground
+/// to one colour exactly as this does.
 public func revnixBackgroundBaseColor(_ ground: String?) -> String {
     let s = ground?.trimmingCharacters(in: .whitespaces) ?? ""
     if s.isEmpty { return "#000000" }
@@ -165,7 +164,7 @@ public func revnixBackgroundBaseColor(_ ground: String?) -> String {
     var colors: [String] = []
     var search = bottom.startIndex ..< bottom.endIndex
     while let match = bottom.range(
-        of: "#[0-9a-fA-F]{3,8}|rgba?\\([^)]*\\)",
+        of: "#[0-9a-fA-F]{3,8}\\b|rgba?\\([^)]*\\)",
         options: [.regularExpression, .caseInsensitive],
         range: search
     ) {
@@ -176,12 +175,31 @@ public func revnixBackgroundBaseColor(_ ground: String?) -> String {
     return colors.first(where: { !revnixIsFullyTransparent($0) }) ?? colors[0]
 }
 
+/// Whether a paint string's BOTTOM layer is a repeating pattern.
+///
+/// A `repeating-*` gradient is a TEXTURE, and the colours inside it are stripe
+/// colours rather than the surface's. When a build cannot draw one, painting a
+/// colour lifted out of its arguments across the whole box is a WRONG answer
+/// rather than a degraded one — the library's `repeating-linear-gradient(180deg,
+/// #0E1B21 0 1px, @bg 1px 26px)` is a hairline every 26px, and its first colour
+/// as a solid fill is a slab. Such a fill paints nothing instead.
+///
+/// The bottom layer is the one that decides, so a pattern stacked over a real
+/// ground (`repeating-…(…), #FBF3E4`) still falls back to that ground.
+public func revnixIsRepeatingPattern(_ css: String?) -> Bool {
+    let s = css?.trimmingCharacters(in: .whitespaces) ?? ""
+    if s.isEmpty { return false }
+    let bottom = revnixSplitTopLevel(s).last ?? s
+    return bottom.lowercased().hasPrefix("repeating-")
+}
+
 /// Whether a colour literal is fully transparent. Kept here rather than routed
 /// through the block colour parser, which lives behind `canImport(SwiftUI)` —
 /// only the two forms the dashboard emits are recognised, and anything else
 /// counts as opaque, which is the safe answer for picking a ground.
 func revnixIsFullyTransparent(_ color: String) -> Bool {
     let s = color.trimmingCharacters(in: .whitespaces)
+    if s.caseInsensitiveCompare("transparent") == .orderedSame { return true }
     if s.hasPrefix("#") {
         let hex = String(s.dropFirst())
         if hex.count == 8 { return UInt8(hex.suffix(2), radix: 16) == 0 }
@@ -252,23 +270,35 @@ private struct RawStop {
     var position: Double?
 }
 
-private func revnixParseStop(_ raw: String, isColor: (String) -> Bool) -> RawStop? {
-    let s = raw.trimmingCharacters(in: .whitespaces)
-    if s.isEmpty { return nil }
-    // The position is the trailing `<n>%`; everything before it is the colour,
-    // which may itself contain spaces (`rgba(0, 0, 0, 0.5)`).
-    if let match = s.range(of: "\\s+-?[0-9.]+%\\s*$", options: .regularExpression) {
-        let color = String(s[s.startIndex ..< match.lowerBound])
+/// One argument of a gradient's stop list, as the stop(s) it stands for.
+///
+/// The positions are the trailing `<n>%` (or a unitless `0`); everything before
+/// them is the colour, which may itself contain spaces (`rgba(0, 0, 0, 0.5)`).
+/// CSS allows TWO positions on one stop — `@accent 0 22%` is the same colour at
+/// both, the hard edge the library's progress bars and split panels are drawn
+/// with — so this answers with a list rather than a single stop. Reading only
+/// the last position left those designs a smooth fade instead of a hard edge,
+/// and dropped the argument entirely when the colour half then failed to parse.
+private func revnixParseStop(_ raw: String, isColor: (String) -> Bool) -> [RawStop] {
+    var body = raw.trimmingCharacters(in: .whitespaces)
+    if body.isEmpty { return [] }
+    var positions: [Double] = []
+    while positions.count < 2,
+          let match = body.range(of: "\\s(-?[0-9.]+%|0)\\s*$", options: .regularExpression) {
+        let text = body[match].trimmingCharacters(in: .whitespaces)
+        // The token comes off `body` either way. Leaving a position this build
+        // could not read attached to the colour made the colour unparseable
+        // too, which dropped the whole stop — and a gradient left with one stop
+        // does not parse at all. A malformed position is worth losing; the stop
+        // is not, so it falls through to the interpolated position instead.
+        body = String(body[body.startIndex ..< match.lowerBound])
             .trimmingCharacters(in: .whitespaces)
-        guard isColor(color) else { return nil }
-        let pctText = String(s[match])
-            .trimmingCharacters(in: .whitespaces)
-            .replacingOccurrences(of: "%", with: "")
-        let pct = Double(pctText).map { min(1, max(0, $0 / 100)) }
-        return RawStop(color: color, position: pct)
+        guard let value = Double(text.replacingOccurrences(of: "%", with: "")) else { break }
+        positions.insert(min(1, max(0, text.hasSuffix("%") ? value / 100 : value)), at: 0)
     }
-    guard isColor(s) else { return nil }
-    return RawStop(color: s, position: nil)
+    guard !body.isEmpty, isColor(body) else { return [] }
+    if positions.isEmpty { return [RawStop(color: body, position: nil)] }
+    return positions.map { RawStop(color: body, position: $0) }
 }
 
 /// Fills in the positions CSS would interpolate for stops that gave none.
@@ -332,7 +362,7 @@ private func revnixParseOneGradient(_ raw: String, isColor: (String) -> Bool) ->
             angle = revnixAngleForKeyword(String(head.dropFirst(3))) ?? 180
             first = 1
         }
-        let stops = args.dropFirst(first).compactMap { revnixParseStop($0, isColor: isColor) }
+        let stops = args.dropFirst(first).flatMap { revnixParseStop($0, isColor: isColor) }
         guard stops.count >= 2 else { return nil }
         // CSS measures clockwise from "to top", so the gradient runs along
         // (sin a, -cos a) in screen coordinates.
@@ -376,7 +406,7 @@ private func revnixParseOneGradient(_ raw: String, isColor: (String) -> Bool) ->
             centerY = numbers[1] / 100
             first = 1
         }
-        let stops = args.dropFirst(first).compactMap { revnixParseStop($0, isColor: isColor) }
+        let stops = args.dropFirst(first).flatMap { revnixParseStop($0, isColor: isColor) }
         guard stops.count >= 2 else { return nil }
         let positions = revnixStopPositions(stops)
         return .radial(
