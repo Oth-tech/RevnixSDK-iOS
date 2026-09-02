@@ -292,4 +292,77 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
     /// nil when no experiment applies — the server sends null, and older
     /// servers omit the key entirely; both decode to nil.
     public let experiment: PlacementExperiment?
+    /// The `paywall` value exactly as the server sent it, alongside the typed
+    /// view above. `paywall` is decoded through `PaywallBlockDoc`, which drops
+    /// what this SDK does not understand — right for a native renderer, wrong
+    /// for a host that renders the document itself (the Flutter and Capacitor
+    /// bridges hand it to Dart / JS). Forward THIS from such a bridge so a
+    /// document from a newer dashboard arrives untouched. nil when the server
+    /// sent null or omitted the key.
+    public let paywallJSON: JSONValue?
+    /// `experiment` as the server sent it; same purpose as `paywallJSON`.
+    public let experimentJSON: JSONValue?
+
+    public init(
+        status: String,
+        placementKey: String,
+        revision: Int,
+        offering: PlacementOffering,
+        paywall: PlacementPaywall? = nil,
+        experiment: PlacementExperiment? = nil,
+        paywallJSON: JSONValue? = nil,
+        experimentJSON: JSONValue? = nil
+    ) {
+        self.status = status
+        self.placementKey = placementKey
+        self.revision = revision
+        self.offering = offering
+        self.paywall = paywall
+        self.experiment = experiment
+        self.paywallJSON = paywallJSON
+        self.experimentJSON = experimentJSON
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status, placementKey, revision, offering, paywall, experiment
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = try c.decode(String.self, forKey: .status)
+        placementKey = try c.decode(String.self, forKey: .placementKey)
+        revision = try c.decode(Int.self, forKey: .revision)
+        offering = try c.decode(PlacementOffering.self, forKey: .offering)
+        // Same key read twice: once loose, once typed. `decodeIfPresent`
+        // already folds a JSON null into nil, so `.null` never lands here.
+        // The typed reads are `try?` for the same reason `PaywallConfig`
+        // softens `blocks`: a document from a newer dashboard must never be
+        // able to fail the whole resolution — the offering and the raw copy
+        // still arrive, and the typed view is simply absent.
+        paywallJSON = try c.decodeIfPresent(JSONValue.self, forKey: .paywall)
+        paywall = (try? c.decodeIfPresent(PlacementPaywall.self, forKey: .paywall)) ?? nil
+        experimentJSON = try c.decodeIfPresent(JSONValue.self, forKey: .experiment)
+        experiment = (try? c.decodeIfPresent(PlacementExperiment.self, forKey: .experiment)) ?? nil
+    }
+
+    /// The raw value wins on the way out: it is what the typed value was
+    /// derived from, so the offline cache keeps everything the server sent
+    /// and a later decode sees the same document the live one did.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(status, forKey: .status)
+        try c.encode(placementKey, forKey: .placementKey)
+        try c.encode(revision, forKey: .revision)
+        try c.encode(offering, forKey: .offering)
+        if let raw = paywallJSON {
+            try c.encode(raw, forKey: .paywall)
+        } else {
+            try c.encodeIfPresent(paywall, forKey: .paywall)
+        }
+        if let raw = experimentJSON {
+            try c.encode(raw, forKey: .experiment)
+        } else {
+            try c.encodeIfPresent(experiment, forKey: .experiment)
+        }
+    }
 }
