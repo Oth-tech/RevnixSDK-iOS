@@ -39,6 +39,11 @@ public struct RevnixPaywallPackage: Identifiable, Sendable, Equatable {
     /// see `revnixMinorUnits(for:)` before converting from major units.
     public let amountMinor: Int?
     public let currency: String?
+    /// REV-263: the catalog product behind this package. Only telemetry reads
+    /// it — a `.selected` or `.purchaseStarted` report names the plan the way
+    /// the rest of the ledger does. Optional: without it the interaction is
+    /// still reported, just with no plan attached.
+    public let productId: String?
 
     public var id: String { packageId }
 
@@ -48,7 +53,8 @@ public struct RevnixPaywallPackage: Identifiable, Sendable, Equatable {
         priceLabel: String,
         period: String? = nil,
         amountMinor: Int? = nil,
-        currency: String? = nil
+        currency: String? = nil,
+        productId: String? = nil
     ) {
         self.packageId = packageId
         self.title = title
@@ -56,6 +62,7 @@ public struct RevnixPaywallPackage: Identifiable, Sendable, Equatable {
         self.period = period
         self.amountMinor = amountMinor
         self.currency = currency
+        self.productId = productId
     }
 }
 
@@ -152,6 +159,21 @@ public protocol RevnixPaywallViewReporting: Sendable {
     /// Defaulted to a no-op for the same source-compatibility reason.
     func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async
 
+    /// REV-263: reports one of the six paywall interactions against the
+    /// display `viewId` identifies. Defaulted to a no-op so a reporter
+    /// written before the vocabulary existed keeps compiling — it simply
+    /// reports views and closes, as it did before.
+    func logPaywallEvent(
+        _ event: RevnixPaywallEvent,
+        viewId: String,
+        placementKey: String?,
+        paywallId: String?,
+        productId: String?,
+        code: String?,
+        message: String?,
+        eventId: String?
+    ) async
+
     /// Reports a paint string the block renderer could not read.
     ///
     /// Local only — it never leaves the device. The renderer keeps drawing (an
@@ -170,6 +192,17 @@ public extension RevnixPaywallViewReporting {
     }
 
     func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {}
+
+    func logPaywallEvent(
+        _ event: RevnixPaywallEvent,
+        viewId: String,
+        placementKey: String?,
+        paywallId: String?,
+        productId: String?,
+        code: String?,
+        message: String?,
+        eventId: String?
+    ) async {}
 }
 
 extension RevnixClient: RevnixPaywallViewReporting {}
@@ -206,6 +239,9 @@ public struct RevnixPaywallView: View {
     /// paywall they never meant to open — would otherwise report a close with
     /// no id and lose the pairing.
     @State private var viewReport: Task<String?, Never>?
+    /// REV-263: rises per CTA press, so a retry is its own occurrence.
+    @State private var purchaseAttempts = 0
+    @State private var didReportNoProducts = false
     @Environment(\.openURL) private var openURL
 
     /// - Parameters:
@@ -335,7 +371,24 @@ public struct RevnixPaywallView: View {
 
     private func select(_ packageId: String) {
         internalSelected = packageId
+        reportSelect(packageId)
         onSelectPackage?(packageId)
+    }
+
+    /// Every CTA path goes through here, so the start report can never be
+    /// wired on one render path and forgotten on the other.
+    private func purchase(_ packageId: String) {
+        reportPurchaseStart(packageId)
+        onPurchase(packageId)
+    }
+
+    /// Restore, likewise — the report rides along with the host's handler.
+    private var restoreAction: (() -> Void)? {
+        guard let onRestore else { return nil }
+        return {
+            reportInteraction(.restore)
+            onRestore()
+        }
     }
 
     // The anchor is dashboard free text while priceLabel is the store's
@@ -385,9 +438,9 @@ public struct RevnixPaywallView: View {
                 heroImageUrl: config.heroImageUrl,
                 footerTermsUrl: config.footer?.termsUrl,
                 footerPrivacyUrl: config.footer?.privacyUrl,
-                onPurchase: { id in if !loading { onPurchase(id) } },
+                onPurchase: { id in if !loading { purchase(id) } },
                 onSelect: { id in select(id) },
-                onRestore: onRestore,
+                onRestore: restoreAction,
                 onTerms: onTerms,
                 onPrivacy: onPrivacy,
                 onClose: onClose.map { close in { reportCloseThen(close) } },
@@ -395,7 +448,7 @@ public struct RevnixPaywallView: View {
                 onDiagnostic: renderDiagnostic
             )
         )
-        .onAppear(perform: reportViewOnce)
+        .onAppear(perform: reportOnAppear)
     }
 
     /// The renderer's diagnostic sink, or nil when the host wired neither a
@@ -427,7 +480,7 @@ public struct RevnixPaywallView: View {
         }
         .background(theme.background.ignoresSafeArea())
         .overlay(alignment: .topTrailing) { classicClose }
-        .onAppear(perform: reportViewOnce)
+        .onAppear(perform: reportOnAppear)
     }
 
     /// The dismiss affordance the classic layouts get (REV-252).
@@ -458,6 +511,13 @@ public struct RevnixPaywallView: View {
     /// navigation round-trips are not — the RN renderer's one-report-per-mount
     /// rule. Shared by both render paths so a designed paywall reports its
     /// view exactly like a classic one.
+    /// Both render paths' `onAppear`. The view report goes first so the
+    /// display exists before anything is reported against it.
+    private func reportOnAppear() {
+        reportViewOnce()
+        reportNoProductsOnce()
+    }
+
     private func reportViewOnce() {
         guard let client, !disableViewTracking, !didReportView else { return }
         didReportView = true
@@ -468,6 +528,79 @@ public struct RevnixPaywallView: View {
             // still fires, it just cannot be paired with this display.
             await client.logPaywallDisplay(placementKey: placementKey, paywallId: paywallId)
         }
+    }
+
+    // ——— REV-263: the interaction vocabulary ———
+    //
+    // The view reports what it genuinely OBSERVES: the selection change, the
+    // CTA press, the restore press, and an offering that arrived with nothing
+    // to sell. It never reports the purchase OUTCOME — the StoreKit call
+    // happens in the host, so only the host knows whether the customer
+    // cancelled at the sheet or the payment was refused. Report those with
+    // `client.logPaywallEvent(.purchaseAbandoned / .purchaseFailed, ...)`
+    // from your own `Product.purchase()` handling.
+    private func reportInteraction(
+        _ event: RevnixPaywallEvent,
+        productId: String? = nil,
+        code: String? = nil,
+        message: String? = nil,
+        eventId: String? = nil
+    ) {
+        guard let client, !disableViewTracking, let viewReport else { return }
+        let placementKey = placementKey
+        let paywallId = paywallId
+        Task {
+            // Awaiting the view beacon for the same reason the close does: an
+            // interaction reported before the display id exists could not be
+            // tied to the display it happened on.
+            guard let viewId = await viewReport.value else { return }
+            await client.logPaywallEvent(
+                event,
+                viewId: viewId,
+                placementKey: placementKey,
+                paywallId: paywallId,
+                productId: productId,
+                code: code,
+                message: message,
+                eventId: eventId.map { "\(viewId):\($0)" }
+            )
+        }
+    }
+
+    /// The catalog product behind a package, so a report names the plan the
+    /// way the rest of the ledger does. Nil when the offering did not carry
+    /// one — reporting the package id instead would look like a product that
+    /// does not exist.
+    private func productId(for packageId: String) -> String? {
+        packages.first { $0.packageId == packageId }?.productId
+    }
+
+    /// Selection. One report per (display, package): a customer toggling
+    /// monthly → yearly → monthly weighed two plans, not three, and the
+    /// server's default key (the viewId alone) would have kept only the first.
+    private func reportSelect(_ packageId: String) {
+        reportInteraction(
+            .selected, productId: productId(for: packageId), eventId: "sel:\(packageId)")
+    }
+
+    /// Checkout start. The attempt counter rises per press so a retry after a
+    /// failure is its own occurrence rather than a duplicate of the first try.
+    private func reportPurchaseStart(_ packageId: String) {
+        purchaseAttempts += 1
+        reportInteraction(
+            .purchaseStarted,
+            productId: productId(for: packageId),
+            eventId: "buy:\(purchaseAttempts)")
+    }
+
+    /// An offering with nothing to sell is the one failure the view can see by
+    /// itself, and the one most worth knowing about: the paywall painted, the
+    /// customer could not buy. Once per display, alongside the view report.
+    private func reportNoProductsOnce() {
+        guard packages.isEmpty, !didReportNoProducts else { return }
+        didReportNoProducts = true
+        reportInteraction(
+            .error, code: "no_products", message: "paywall displayed with no packages")
     }
 
     /// Runs the host's dismissal, reporting `paywall.closed` alongside it
@@ -1138,7 +1271,7 @@ public struct RevnixPaywallView: View {
 
     private var cta: some View {
         Button {
-            if !loading, let selectedId { onPurchase(selectedId) }
+            if !loading, let selectedId { purchase(selectedId) }
         } label: {
             ZStack {
                 if loading {
@@ -1182,7 +1315,7 @@ public struct RevnixPaywallView: View {
         return [
             FooterItem(
                 show: footer?.showRestore ?? true, label: "Restore",
-                action: onRestore),
+                action: restoreAction),
             FooterItem(
                 show: footer?.showTerms ?? true, label: "Terms",
                 action: onTerms ?? open(footer?.termsUrl)),

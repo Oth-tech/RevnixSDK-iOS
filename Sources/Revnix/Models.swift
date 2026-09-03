@@ -124,6 +124,40 @@ public struct RegisterPurchaseResult: Codable, Sendable, Equatable {
 
 // ——— GET /v1/placements/{key}/offering ———
 
+/// REV-263: the six paywall interactions `logPaywallEvent` can report — what
+/// the customer did on a display, between the view that opened it and the
+/// close or purchase that ended it. The server turns each into the ledger
+/// type `paywall.<rawValue>`.
+public enum RevnixPaywallEvent: String, Codable, Sendable, CaseIterable {
+    /// A package was picked.
+    case selected
+    /// Checkout was started.
+    case purchaseStarted = "purchase_started"
+    /// The customer backed out at the store sheet
+    /// (`Product.PurchaseResult.userCancelled`).
+    case purchaseAbandoned = "purchase_abandoned"
+    /// The store refused the payment.
+    case purchaseFailed = "purchase_failed"
+    /// Restore purchases was tapped.
+    case restore
+    /// The paywall itself failed — config, products, or render.
+    case error
+}
+
+/// What the host tells `RevnixPaywallView` about a purchase it performed
+/// (REV-263). Returning it from the view's `onPurchase` is what lets the
+/// paywall report `.purchaseAbandoned` / `.purchaseFailed` itself — without
+/// it the SDK sees only that checkout STARTED, because the StoreKit call
+/// happens in the host.
+///
+/// `.completed` needs no report of its own: the purchase lands as
+/// `purchase.completed` through `registerPurchase`.
+public enum RevnixPurchaseOutcome: Sendable, Equatable {
+    case completed
+    case cancelled
+    case failed(code: String? = nil, message: String? = nil)
+}
+
 public struct PlacementPackage: Codable, Sendable, Equatable {
     public let packageId: String
     public let productId: String
