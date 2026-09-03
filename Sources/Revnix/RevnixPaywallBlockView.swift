@@ -357,6 +357,15 @@ private struct BlockStyleModifier: ViewModifier {
         // A percentage width fills the axis it was given — the closest SwiftUI
         // has to a fraction of the parent without measuring it.
         if s.width?.fraction != nil { view = AnyView(view.frame(maxWidth: .infinity)) }
+        // A percentage height fills likewise. A root card at `height: "100%"`
+        // is what lets a design follow a taller canvas instead of leaving a
+        // band under it (render contract v2 §3).
+        if s.height?.fraction != nil { view = AnyView(view.frame(maxHeight: .infinity)) }
+        // `inset` fills the stack it sits in on both axes (§5) — the
+        // full-bleed photo and the scrim over it are both authored this way.
+        if inStack, s.inset == true {
+            view = AnyView(view.frame(maxWidth: .infinity, maxHeight: .infinity))
+        }
 
         // The painted surface. A gradient reaches here as the CSS string the
         // dashboard put in `background`; it is parsed into the same layers the
@@ -445,9 +454,14 @@ private extension View {
 struct BlockContext {
     let doc: PaywallBlockDoc
     let packages: [RevnixPaywallPackage]
-    /// The package a plan card visually emphasizes, and the one whose tags a
-    /// subtree resolves against outside a `repeat`.
+    /// The selected package — already resolved by `revnixSelectedPackageId`
+    /// (host → own tap → highlight → first). It is what a plan card's
+    /// `selectedStyle` answers to and what tags outside any package card
+    /// resolve against.
     let selectedPackageId: String?
+    /// Host `loading` (render contract v2 §4): purchase buttons disable and
+    /// show a spinner in place of their label; close buttons are unaffected.
+    let loading: Bool
     let heroImageUrl: String?
     let footerTermsUrl: String?
     let footerPrivacyUrl: String?
@@ -466,6 +480,11 @@ struct BlockContext {
     /// still draws — a fill falls back to a colour from the design — but the
     /// host gets told, which is what a silent black screen never did.
     var onDiagnostic: ((String) -> Void)?
+
+    /// The package root-level copy resolves its tags against (contract §2).
+    var selectedPackage: RevnixPaywallPackage? {
+        packages.first { $0.packageId == selectedPackageId }
+    }
 }
 
 /// Makes an element the paywall's dismiss target when the design marks it as
@@ -491,31 +510,83 @@ struct CloseOnTap: ViewModifier {
     }
 }
 
+/// The press feedback every designed button gets (render contract v2 §4):
+/// 80% while the finger is down, full weight on release. Deliberately no
+/// dimming while disabled — the loading state paints its own answer (the
+/// spinner) and must keep the fill behind it.
+struct RevnixBlockButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.8 : 1)
+    }
+}
+
+/// A scroll container that scrolls only when it has to (contract §3): no
+/// bounce or overscroll while the content fits the viewport. `fits` is nil
+/// where the caller cannot measure; the pre-16.4 fallback then leaves
+/// scrolling on rather than guess.
+struct RevnixFitScroll: ViewModifier {
+    let fits: Bool?
+
+    func body(content: Content) -> some View {
+        if #available(iOS 16.4, macOS 13.3, tvOS 16.4, watchOS 9.4, *) {
+            content.scrollBounceBehavior(.basedOnSize)
+        } else {
+            content.scrollDisabled(fits ?? false)
+        }
+    }
+}
+
 /// Renders one block. Anything it cannot render contributes nothing and its
 /// siblings are unaffected.
 struct BlockView: View {
     let block: PaywallBlock
     let ctx: BlockContext
-    /// The package this subtree describes, when inside a plan card.
+    /// The package this subtree describes: the nearest pinned or repeated
+    /// card's. Nil outside any package card.
     var package: RevnixPaywallPackage?
     var inStack: Bool = false
 
     private var doc: PaywallBlockDoc { ctx.doc }
 
+    /// Where the block stands relative to the selection (contract §1). Read
+    /// off `package`, so a plain card inside a pinned one inherits its row's.
+    private var context: RevnixBlockSelectionContext {
+        revnixSelectionContext(package: package, selectedPackageId: ctx.selectedPackageId)
+    }
+
+    /// The package copy tags resolve against (contract §2): the enclosing
+    /// card's, else the selected one — which is what turns the renewal line
+    /// every template carries ("then {price}/{period_short}") into a price.
+    private var tagPackage: RevnixPaywallPackage? { package ?? ctx.selectedPackage }
+
+    /// `selectedStyle` merged over `style` in selected context, else `style`.
+    private var style: BlockStyle? { revnixEffectiveStyle(block, in: context) }
+
     var body: some View {
+        if case let .card(b) = block {
+            // A card judges context per instance — a pinned card's is its own
+            // package's, not its parent's — so it decides visibility itself.
+            CardBlockView(block: b, ctx: ctx, package: package, inStack: inStack)
+        } else if revnixIsBlockVisible(block, in: context) {
+            leaf
+        }
+    }
+
+    @ViewBuilder
+    private var leaf: some View {
         switch block {
         case let .text(b):
-            Text(revnixResolveTags(b.text, package: package, all: ctx.packages))
-                .modifier(TextStyling(style: b.style, doc: doc, onDiagnostic: ctx.onDiagnostic))
-                .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+            Text(revnixResolveTags(b.text, package: tagPackage, all: ctx.packages))
+                .modifier(TextStyling(style: style, doc: doc, onDiagnostic: ctx.onDiagnostic))
+                .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
                 .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
 
         case let .image(b):
-            ImageBlockView(block: b, ctx: ctx, inStack: inStack)
+            ImageBlockView(block: b, style: style, ctx: ctx, inStack: inStack)
                 .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
 
         case let .list(b):
-            VStack(alignment: .leading, spacing: b.style?.gap ?? 8) {
+            VStack(alignment: .leading, spacing: style?.gap ?? 8) {
                 ForEach(Array(b.items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .top, spacing: 9) {
                         Text(item.icon ?? "✓")
@@ -532,11 +603,11 @@ struct BlockView: View {
                     }
                 }
             }
-            .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+            .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .products(b):
             ProductsBlockView(block: b, ctx: ctx)
-                .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+                .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .button(b):
             // A button the design marks as the close dismisses instead of
@@ -544,58 +615,71 @@ struct BlockView: View {
             // accented thing on the screen, or a "Not now" competes with
             // "Subscribe" for the eye.
             let closesPaywall = b.action == .close && ctx.onClose != nil
+            // Loading disables purchasing and swaps the label for a spinner
+            // (contract §4). A close button keeps working: the customer must
+            // be able to leave while a purchase is in flight.
+            let busy = ctx.loading && !closesPaywall
             // `strippedBox` hands the box back to us, so the fill is resolved
             // here rather than by the style modifier — which is why a gradient
             // CTA used to flatten to the plain accent.
             let buttonFill: RevnixBlockFill =
-                revnixBlockFill(b.style?.fill, doc, onDiagnostic: ctx.onDiagnostic)
+                revnixBlockFill(style?.fill, doc, onDiagnostic: ctx.onDiagnostic)
                     ?? .color(closesPaywall
                         ? .clear
                         : (revnixBlockColor(doc.accent, doc) ?? .accentColor))
+            let ink = closesPaywall
+                ? (revnixBlockColor(doc.textColor, doc) ?? .primary)
+                : (revnixBlockColor(doc.accentInk, doc) ?? .white)
             Button {
                 if closesPaywall {
                     ctx.onClose?()
-                } else if let id = ctx.selectedPackageId ?? ctx.packages.first?.packageId {
+                } else if !ctx.loading, let id = ctx.selectedPackageId ?? ctx.packages.first?.packageId {
                     ctx.onPurchase(id)
                 }
             } label: {
-                Text(revnixResolveTags(b.label, package: package, all: ctx.packages))
-                    .modifier(TextStyling(style: b.style, doc: doc, defaultWeight: .heavy, defaultSize: 15, onDiagnostic: ctx.onDiagnostic))
+                Text(revnixResolveTags(b.label, package: tagPackage, all: ctx.packages))
+                    .modifier(TextStyling(style: style, doc: doc, defaultWeight: .heavy, defaultSize: 15, onDiagnostic: ctx.onDiagnostic))
+                    // Hidden rather than removed, so the box keeps the size
+                    // the label gave it while the spinner stands in for it.
+                    .opacity(busy ? 0 : 1)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, b.style?.height == nil ? 15 : 0)
+                    .padding(.vertical, style?.height == nil ? 15 : 0)
                     .padding(.horizontal, 16)
-                    .frame(height: b.style?.height?.points.map { CGFloat($0) })
+                    .frame(height: style?.height?.points.map { CGFloat($0) })
+                    .overlay {
+                        if busy { ProgressView().tint(ink) }
+                    }
                     .background(RevnixFillView(fill: buttonFill, doc: doc))
-                    .foregroundStyle(closesPaywall
-                        ? (revnixBlockColor(doc.textColor, doc) ?? .primary)
-                        : (revnixBlockColor(doc.accentInk, doc) ?? .white))
-                    .clipShape(RoundedRectangle(cornerRadius: b.style?.radius ?? 12))
+                    .foregroundStyle(ink)
+                    .clipShape(RoundedRectangle(cornerRadius: style?.radius ?? 12))
             }
-            .buttonStyle(.plain)
-            .revnixBlockStyle(strippedBox(b.style), doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+            .buttonStyle(RevnixBlockButtonStyle())
+            .disabled(busy)
+            .revnixBlockStyle(strippedBox(style), doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .links(b):
             LinksBlockView(block: b, ctx: ctx)
-                .revnixBlockStyle(b.style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+                .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
-        case let .line(b):
+        case .line:
             RevnixFillView(
-                fill: revnixBlockFill(b.style?.fill, doc, onDiagnostic: ctx.onDiagnostic)
+                fill: revnixBlockFill(style?.fill, doc, onDiagnostic: ctx.onDiagnostic)
                     ?? .color((revnixBlockColor(doc.textColor, doc) ?? .primary).opacity(0.16)),
                 doc: doc
             )
-            .frame(height: b.style?.height?.points ?? 1)
-                .revnixBlockStyle(strippedBox(b.style), doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+            .frame(height: style?.height?.points ?? 1)
+                .revnixBlockStyle(strippedBox(style), doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
 
         case let .spacer(b):
             if b.flex == true {
                 Spacer(minLength: 0)
             } else {
-                Color.clear.frame(height: b.style?.height?.points ?? 16)
+                Color.clear.frame(height: style?.height?.points ?? 16)
             }
 
-        case let .card(b):
-            CardBlockView(block: b, ctx: ctx, package: package, inStack: inStack)
+        case .card:
+            // Handled in `body`, which routes every card to CardBlockView.
+            EmptyView()
 
         case .unknown:
             // A block type from a newer dashboard: skip it, keep the screen.
@@ -673,33 +757,44 @@ private struct TextStyling: ViewModifier {
 
 private struct ImageBlockView: View {
     let block: ImageBlock
+    /// The effective style — `selectedStyle` already merged in by the caller.
+    let style: BlockStyle?
     let ctx: BlockContext
     let inStack: Bool
 
     var body: some View {
         let url = (block.url?.isEmpty == false ? block.url : nil) ?? ctx.heroImageUrl
+        let inset = inStack && style?.inset == true
         // A converted design sizes its own slot; the 160pt default is only for
         // a slot dropped into a flow column, and must not fight it.
-        let sized = block.style.map {
-            $0.inset == true || $0.height != nil || $0.aspectRatio != nil || $0.flex != nil
-        } ?? false
+        let sized = inset || (style.map {
+            $0.height != nil || $0.aspectRatio != nil || $0.flex != nil
+        } ?? false)
         let radius: CGFloat = block.shape == "circle" ? 999 : sized ? 0 : 16
 
-        Group {
-            if let url, let parsed = URL(string: url) {
-                AsyncImage(url: parsed) { image in
-                    image.resizable().aspectRatio(contentMode: block.fit == "contain" ? .fit : .fill)
-                } placeholder: {
+        // The clear base owns the box and the photo paints over it. Laid out
+        // directly, a `cover` image reports its own scaled size and pushes the
+        // layout past the box it was given — the classic hero avoids that the
+        // same way. An `inset` image fills its stack on both axes (contract
+        // §5): the style modifier grants the size and this base accepts it.
+        Color.clear
+            .overlay {
+                if let url, let parsed = URL(string: url) {
+                    AsyncImage(url: parsed) { image in
+                        image.resizable().aspectRatio(contentMode: block.fit == "contain" ? .fit : .fill)
+                    } placeholder: {
+                        slot
+                    }
+                } else {
                     slot
                 }
-            } else {
-                slot
             }
-        }
-        .frame(height: sized ? nil : 160)
-        .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: radius))
-        .revnixBlockStyle(block.style, ctx.doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+            .frame(height: sized ? nil : 160)
+            .frame(maxWidth: .infinity)
+            // A GPU pass over the drawn box, no decode — cheap enough to honour.
+            .modifier(RevnixBlurModifier(radius: style?.blur))
+            .clipShape(RoundedRectangle(cornerRadius: radius))
+            .revnixBlockStyle(style, ctx.doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
     }
 
     private var slot: some View {
@@ -867,29 +962,36 @@ private struct CardBlockView: View {
             // single instance still renders, so the design stays visible.
             let list: [RevnixPaywallPackage?] = ctx.packages.isEmpty ? [nil] : ctx.packages.map { $0 }
             ForEach(Array(list.enumerated()), id: \.offset) { _, pkg in
-                container(for: pkg, style: styleFor(pkg), selects: pkg?.packageId)
+                instance(for: pkg, selects: pkg?.packageId)
             }
-        } else if let index = block.packageIndex, index >= ctx.packages.count {
+        } else if let index = block.packageIndex, !ctx.packages.indices.contains(index) {
             // A card that names a package the offering does not reach is
             // dropped rather than shown with unresolved tags.
             EmptyView()
         } else {
-            let ctxPackage = block.packageIndex.flatMap { ctx.packages.indices.contains($0) ? ctx.packages[$0] : nil }
+            let ctxPackage = block.packageIndex.map { ctx.packages[$0] }
             // A card pinned to a package doubles as its selection target —
             // that is how hand-styled plan rows (a highlighted annual beside
-            // a plain monthly) become tappable without a products block. It
-            // takes `selectedStyle` when selected for the same reason a
-            // repeated card does, or tapping it would change what the CTA
-            // buys with no visible answer. A card that names no package is
-            // decoration and stays inert.
-            container(for: ctxPackage ?? package, style: styleFor(ctxPackage), selects: ctxPackage?.packageId)
+            // a plain monthly) become tappable without a products block. A
+            // card that names no package is decoration and stays inert, and
+            // inherits whatever package card it sits inside.
+            instance(for: ctxPackage ?? package, selects: ctxPackage?.packageId)
         }
     }
 
-    private func styleFor(_ pkg: RevnixPaywallPackage?) -> BlockStyle? {
-        let selected = ctx.selectedPackageId ?? ctx.packages.first?.packageId
-        guard let pkg, pkg.packageId == selected else { return block.style }
-        return (block.style ?? BlockStyle()).merging(block.selectedStyle)
+    /// One drawn instance of the card. Its context is its OWN package's when
+    /// it is pinned or repeated and the inherited one otherwise (contract §1),
+    /// so a plain card inside a plan row takes that row's selection, and a
+    /// pinned card decides for itself whether it is visible at all. Its
+    /// `selectedStyle` is the whole of its selection feedback — no opacity
+    /// on press, by design.
+    @ViewBuilder
+    private func instance(for pkg: RevnixPaywallPackage?, selects packageId: String?) -> some View {
+        let whole = PaywallBlock.card(block)
+        let context = revnixSelectionContext(package: pkg, selectedPackageId: ctx.selectedPackageId)
+        if revnixIsBlockVisible(whole, in: context) {
+            container(for: pkg, style: revnixEffectiveStyle(whole, in: context), selects: packageId)
+        }
     }
 
     @ViewBuilder
@@ -899,16 +1001,16 @@ private struct CardBlockView: View {
         selects packageId: String? = nil
     ) -> some View {
         let kind = block.layout ?? "column"
-        let spacing = block.style?.gap ?? 10
+        let spacing = style?.gap ?? 10
         let children = block.children
 
         Group {
             switch kind {
             case "row":
                 HStack(alignment: crossAlignmentVertical, spacing: spacing) {
-                    if block.style?.justify == "center" || block.style?.justify == "end" { Spacer(minLength: 0) }
+                    if style?.justify == "center" || style?.justify == "end" { Spacer(minLength: 0) }
                     childViews(children, pkg, inStack: false)
-                    if block.style?.justify == "center" || block.style?.justify == "start" { Spacer(minLength: 0) }
+                    if style?.justify == "center" || style?.justify == "start" { Spacer(minLength: 0) }
                 }
             case "stack":
                 ZStack(alignment: .topLeading) {
@@ -973,33 +1075,59 @@ private struct CardBlockView: View {
 ///
 /// A `canvas` document is authored against a fixed 393×852 device screen and
 /// is scaled as a whole, so absolute placement inside `stack` containers stays
-/// true at any width; a `flow` document lays out as an ordinary column.
+/// true at any width. The rules are render contract v2 §3, shared with every
+/// other renderer (`revnixCanvasMetrics` is the testable half):
+///
+///   * scale = min(width, 480) / 393 — a phone design never grows past ~1.22×
+///     on a tablet or in landscape; it sits centred with the document
+///     background filling the viewport around it;
+///   * the layout is at least 852 design units tall and grows to fill a taller
+///     viewport, so a root card at `height: "100%"` follows and nothing leaves
+///     a band under the design;
+///   * a shorter viewport scrolls, indicator hidden, no bounce when it fits;
+///   * it is full-bleed under the status bar (the designs pad their own
+///     bottom inset) while the fallback close stays inside the safe area.
+///
+/// A `flow` document lays out as an ordinary scrolling column.
 struct RevnixPaywallBlockView: View {
     let doc: PaywallBlockDoc
     let ctx: BlockContext
 
     var body: some View {
-        GeometryReader { geo in
-            let scale = geo.size.width / PaywallBlockDoc.canvasWidth
-            // REV-252: overlaid OUTSIDE the canvas scale, so the fallback close
-            // keeps its tap size and its distance from the screen edge whatever
-            // the device width does to the design.
-            ZStack(alignment: .topTrailing) {
-                if doc.layout == "canvas" {
-                    content
-                        .frame(width: PaywallBlockDoc.canvasWidth, height: PaywallBlockDoc.canvasHeight, alignment: .topLeading)
-                        .scaleEffect(scale, anchor: .topLeading)
-                        .frame(width: geo.size.width, height: PaywallBlockDoc.canvasHeight * scale, alignment: .topLeading)
-                        .clipped()
-                } else {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        content.frame(maxWidth: .infinity, alignment: .leading).padding(20)
-                    }
-                }
-                fallbackClose
+        // REV-252: the close is overlaid OUTSIDE the canvas scale and inside
+        // the safe area, so it keeps its tap size and its distance from the
+        // screen edge whatever the device does to the design.
+        ZStack(alignment: .topTrailing) {
+            if doc.layout == "canvas" {
+                canvas.ignoresSafeArea()
+            } else {
+                flow
             }
+            fallbackClose
         }
         .background(screenBackground.ignoresSafeArea())
+    }
+
+    private var canvas: some View {
+        GeometryReader { geo in
+            let metrics = revnixCanvasMetrics(viewportWidth: geo.size.width, viewportHeight: geo.size.height)
+            ScrollView(.vertical, showsIndicators: false) {
+                content
+                    .frame(width: PaywallBlockDoc.canvasWidth, height: metrics.layoutHeight, alignment: .topLeading)
+                    .scaleEffect(metrics.scale, anchor: .topLeading)
+                    .frame(width: metrics.scaledWidth, height: metrics.scaledHeight, alignment: .topLeading)
+                    .clipped()
+                    .frame(maxWidth: .infinity)
+            }
+            .modifier(RevnixFitScroll(fits: metrics.fits))
+        }
+    }
+
+    private var flow: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            content.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+        }
+        .modifier(RevnixFitScroll(fits: nil))
     }
 
     /// The dismiss affordance the renderer supplies itself (REV-252).

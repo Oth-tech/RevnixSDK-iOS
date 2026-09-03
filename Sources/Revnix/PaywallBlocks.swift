@@ -258,12 +258,31 @@ public enum BlockAction: String, Sendable, Equatable {
     case close
 }
 
+/// When a block is drawn, relative to the package card it sits inside (render
+/// contract v2, REV-262).
+///
+/// `selected` draws the block only while its nearest package-bearing ancestor
+/// — a pinned or repeated card — describes the selected package; `unselected`
+/// only while it does not; absent means always. Outside any package card the
+/// field is ignored and the block is always drawn: never hide a root-level
+/// block. See `revnixIsBlockVisible`.
+public enum BlockVisibility: String, Sendable, Equatable {
+    case selected
+    case unselected
+}
+
 public struct TextBlock: Sendable, Equatable {
     public var id: String
     public var text: String
     /// Tapping this block dismisses the paywall. See `BlockAction`.
     public var action: BlockAction?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 public struct ImageBlock: Sendable, Equatable {
@@ -276,6 +295,12 @@ public struct ImageBlock: Sendable, Equatable {
     /// Tapping this block dismisses the paywall. See `BlockAction`.
     public var action: BlockAction?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 public struct ListItem: Codable, Sendable, Equatable {
@@ -297,6 +322,12 @@ public struct ListBlock: Sendable, Equatable {
     /// Icon color; defaults to the screen accent.
     public var iconColor: String?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 /// Renders the attached offering's packages as selectable cards.
@@ -310,6 +341,12 @@ public struct ProductsBlock: Sendable, Equatable {
     public var cardStyle: BlockStyle?
     public var highlightStyle: BlockStyle?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 public struct ButtonBlock: Sendable, Equatable {
@@ -319,6 +356,12 @@ public struct ButtonBlock: Sendable, Equatable {
     /// purchase CTA, which is what a button means by default.
     public var action: BlockAction?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 public struct LinksBlock: Sendable, Equatable {
@@ -329,11 +372,23 @@ public struct LinksBlock: Sendable, Equatable {
     public var termsUrl: String?
     public var privacyUrl: String?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 public struct LineBlock: Sendable, Equatable {
     public var id: String
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 public struct SpacerBlock: Sendable, Equatable {
@@ -341,6 +396,12 @@ public struct SpacerBlock: Sendable, Equatable {
     /// Grows to push what follows to the bottom.
     public var flex: Bool?
     public var style: BlockStyle?
+    /// Merged over `style` while the block is in selected context — inside a
+    /// pinned or repeated card whose package is the selected one. Valid on
+    /// every block type (render contract v2).
+    public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
 }
 
 /// The one container block. `layout` picks how children are placed: column /
@@ -354,6 +415,8 @@ public struct CardBlock: Sendable, Equatable {
     public var repeatMode: String?
     /// Merged over `style` on the package the customer has selected.
     public var selectedStyle: BlockStyle?
+    /// Drawn only in the matching context; nil is always. See `BlockVisibility`.
+    public var visibility: BlockVisibility?
     /// "This card describes package N of the offering". A card whose index the
     /// offering does not reach is hidden.
     public var packageIndex: Int?
@@ -362,8 +425,7 @@ public struct CardBlock: Sendable, Equatable {
     /// grid only — a CSS track list ("1fr 60px 66px").
     public var gridColumns: String?
     public var children: [PaywallBlock]
-    public var style: BlockStyle?
-}
+    public var style: BlockStyle?}
 
 /// One node of the tree.
 ///
@@ -390,6 +452,7 @@ extension PaywallBlock: Decodable {
         case direction, titleTpl, priceTpl, highlightSub, badgeText, cardStyle, highlightStyle
         case label, showRestore, showTerms, showPrivacy, termsUrl, privacyUrl
         case flex, layout, `repeat`, selectedStyle, packageIndex, columns, gridColumns, children
+        case visibility
     }
 
     public init(from decoder: Decoder) throws {
@@ -408,44 +471,64 @@ extension PaywallBlock: Decodable {
         // element inert rather than failing the block — the same forgiveness
         // the unknown-type catch-all gives.
         let action = string(.action).flatMap(BlockAction.init(rawValue:))
+        // Render contract v2: both fields are valid on EVERY block type. A
+        // visibility value this SDK does not know decodes to nil — always
+        // drawn — for the same reason an unknown action decodes to inert.
+        let selectedStyle = styleAt(.selectedStyle)
+        let visibility = string(.visibility).flatMap(BlockVisibility.init(rawValue:))
 
         switch type {
         case "text":
-            self = .text(TextBlock(id: id, text: string(.text) ?? "", action: action, style: style))
+            self = .text(TextBlock(
+                id: id, text: string(.text) ?? "", action: action, style: style,
+                selectedStyle: selectedStyle, visibility: visibility
+            ))
         case "image":
             self = .image(ImageBlock(
                 id: id, url: string(.url), shape: string(.shape), fit: string(.fit),
-                placeholder: string(.placeholder), action: action, style: style
+                placeholder: string(.placeholder), action: action, style: style,
+                selectedStyle: selectedStyle, visibility: visibility
             ))
         case "list":
             let items = (try? c.decodeIfPresent([ListItem].self, forKey: .items)) as? [ListItem] ?? []
-            self = .list(ListBlock(id: id, items: items, iconColor: string(.iconColor), style: style))
+            self = .list(ListBlock(
+                id: id, items: items, iconColor: string(.iconColor), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
+            ))
         case "products":
             self = .products(ProductsBlock(
                 id: id, direction: string(.direction), titleTpl: string(.titleTpl),
                 priceTpl: string(.priceTpl), highlightSub: string(.highlightSub),
                 badgeText: string(.badgeText), cardStyle: styleAt(.cardStyle),
-                highlightStyle: styleAt(.highlightStyle), style: style
+                highlightStyle: styleAt(.highlightStyle), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
             ))
         case "button":
-            self = .button(ButtonBlock(id: id, label: string(.label) ?? "", action: action, style: style))
+            self = .button(ButtonBlock(
+                id: id, label: string(.label) ?? "", action: action, style: style,
+                selectedStyle: selectedStyle, visibility: visibility
+            ))
         case "links":
             self = .links(LinksBlock(
                 id: id, showRestore: bool(.showRestore), showTerms: bool(.showTerms),
                 showPrivacy: bool(.showPrivacy), termsUrl: string(.termsUrl),
-                privacyUrl: string(.privacyUrl), style: style
+                privacyUrl: string(.privacyUrl), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
             ))
         case "line":
-            self = .line(LineBlock(id: id, style: style))
+            self = .line(LineBlock(id: id, style: style, selectedStyle: selectedStyle, visibility: visibility))
         case "spacer":
-            self = .spacer(SpacerBlock(id: id, flex: bool(.flex), style: style))
+            self = .spacer(SpacerBlock(
+                id: id, flex: bool(.flex), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
+            ))
         case "card":
             let children = (try? c.decodeIfPresent([PaywallBlock].self, forKey: .children)) as? [PaywallBlock] ?? []
             let columns = (try? c.decodeIfPresent(Int.self, forKey: .columns)) as? Int
             let index = (try? c.decodeIfPresent(Int.self, forKey: .packageIndex)) as? Int
             self = .card(CardBlock(
                 id: id, layout: string(.layout), repeatMode: string(.repeat),
-                selectedStyle: styleAt(.selectedStyle), packageIndex: index,
+                selectedStyle: selectedStyle, visibility: visibility, packageIndex: index,
                 columns: columns, gridColumns: string(.gridColumns),
                 children: children, style: style
             ))
@@ -467,6 +550,38 @@ extension PaywallBlock: Decodable {
         case let .line(b): return b.style
         case let .spacer(b): return b.style
         case let .card(b): return b.style
+        case .unknown: return nil
+        }
+    }
+
+    /// The style merged over `style` in selected context, whatever kind it is.
+    public var selectedStyle: BlockStyle? {
+        switch self {
+        case let .text(b): return b.selectedStyle
+        case let .image(b): return b.selectedStyle
+        case let .list(b): return b.selectedStyle
+        case let .products(b): return b.selectedStyle
+        case let .button(b): return b.selectedStyle
+        case let .links(b): return b.selectedStyle
+        case let .line(b): return b.selectedStyle
+        case let .spacer(b): return b.selectedStyle
+        case let .card(b): return b.selectedStyle
+        case .unknown: return nil
+        }
+    }
+
+    /// The block's visibility rule, whatever kind it is.
+    public var visibility: BlockVisibility? {
+        switch self {
+        case let .text(b): return b.visibility
+        case let .image(b): return b.visibility
+        case let .list(b): return b.visibility
+        case let .products(b): return b.visibility
+        case let .button(b): return b.visibility
+        case let .links(b): return b.visibility
+        case let .line(b): return b.visibility
+        case let .spacer(b): return b.visibility
+        case let .card(b): return b.visibility
         case .unknown: return nil
         }
     }
@@ -601,8 +716,13 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
 /// suppress the fallback and leave the customer with no way out — the exact
 /// bug this feature exists to fix. Two close buttons is merely ugly, so the
 /// tie breaks toward always having one.
+///
+/// A block with `visibility` set is skipped for the same reason: it is drawn
+/// only in one selection state, so a close authored on it is conditional too
+/// (render contract v2 §1).
 public func revnixHasCloseAction(_ blocks: [PaywallBlock]) -> Bool {
     blocks.contains { block in
+        guard block.visibility == nil else { return false }
         switch block {
         case let .text(b): return b.action == .close
         case let .image(b): return b.action == .close
