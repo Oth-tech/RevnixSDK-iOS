@@ -369,6 +369,58 @@ public actor RevnixClient {
         }
     }
 
+    /// Report one of the six paywall interactions (REV-263) — what the
+    /// customer DID on a display, between the `logPaywallDisplay` that opened
+    /// it and the `logPaywallClosed` (or purchase) that ended it.
+    ///
+    /// Fire-and-forget like the other beacons: never throws.
+    ///
+    /// `viewId` is the id `logPaywallDisplay` returned for THIS display.
+    /// Passing it is what threads the whole life of one impression together
+    /// and puts the event on the paywall's own analytics row.
+    ///
+    /// `RevnixPaywallView` reports `.selected`, `.purchaseStarted`,
+    /// `.restore` and a no-products `.error` for you. The purchase OUTCOME is
+    /// yours: only your app performs the StoreKit call, so report
+    /// `.purchaseAbandoned` / `.purchaseFailed` from your own error handling
+    /// (`Product.PurchaseResult.userCancelled` is an abandonment, a thrown
+    /// `StoreKitError` is a failure).
+    ///
+    /// `eventId` is the idempotency key and defaults to `viewId`, which caps
+    /// the report at one per display per event. Pass one per occurrence — and
+    /// reuse it across your own retries — to record each occurrence.
+    public func logPaywallEvent(
+        _ event: RevnixPaywallEvent,
+        viewId: String,
+        placementKey: String? = nil,
+        paywallId: String? = nil,
+        productId: String? = nil,
+        code: String? = nil,
+        message: String? = nil,
+        eventId: String? = nil
+    ) async {
+        var body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "viewId": .string(viewId),
+            "event": .string(event.rawValue),
+            "sdkVersion": .string(Self.sdkVersion),
+        ]
+        if let v = eventId { body["eventId"] = .string(v) }
+        if let v = placementKey { body["placementKey"] = .string(v) }
+        if let v = paywallId { body["paywallId"] = .string(v) }
+        if let v = productId { body["productId"] = .string(v) }
+        if let v = code { body["code"] = .string(v) }
+        // The server bounds `message` at 1024; trimming here keeps a long
+        // localized store error from turning the whole report into a 400.
+        if let v = message { body["message"] = .string(String(v.prefix(1024))) }
+        do {
+            _ = try await request(path: "/v1/paywalls/events", method: "POST", body: body)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "logPaywallEvent", message: "\(error)")
+        }
+    }
+
     /// Set attributes on the current customer (REV-033 v2). Attributes are
     /// what A/B-test audiences target — set `country`, `app_version`,
     /// `locale`, or any custom key you want to segment on. A `.null` value
