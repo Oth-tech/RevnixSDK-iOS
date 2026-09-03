@@ -322,15 +322,15 @@ public struct RevnixPaywallView: View {
     /// selection resolves against `packages` rather than the template-filtered
     /// `shown`. Resolving against `shown` would silently drop a tap on any
     /// card the classic "minimal" filter happens to exclude.
+    ///
+    /// The rule itself (host → own tap → highlight → first, each only if it
+    /// names an offered package) is `revnixSelectedPackageId`, shared with the
+    /// tests that walk the cross-SDK fixture.
     private var blockSelectedId: String? {
-        if let controlled = selectedPackageId { return controlled }
-        if let internalSelected,
-            packages.contains(where: { $0.packageId == internalSelected })
-        {
-            return internalSelected
-        }
-        return packages.first { $0.packageId == config.highlightPackageId }?
-            .packageId ?? packages.first?.packageId
+        revnixSelectedPackageId(
+            host: selectedPackageId, internal: internalSelected,
+            highlight: config.highlightPackageId, packages: packages
+        )
     }
 
     private func select(_ packageId: String) {
@@ -381,6 +381,7 @@ public struct RevnixPaywallView: View {
                 doc: blockDoc,
                 packages: packages,
                 selectedPackageId: blockSelectedId,
+                loading: loading,
                 heroImageUrl: config.heroImageUrl,
                 footerTermsUrl: config.footer?.termsUrl,
                 footerPrivacyUrl: config.footer?.privacyUrl,

@@ -14,6 +14,7 @@ let package = Package(
             resources: [
                 .copy("Resources/Revnix.storekit"),
                 .copy("Resources/paywall-background-wire.json"),
+                .copy("Resources/paywall-selection-wire.json"),
             ]
         ),
     ]
