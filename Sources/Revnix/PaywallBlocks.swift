@@ -26,6 +26,11 @@ import Foundation
 /// alpha percentage: `@text/12`).
 public struct BlockStyle: Codable, Sendable, Equatable {
     public var fill: String?
+    /// Sizing for a `fill` that is an image or a REPEATING gradient — the CSS
+    /// `background-size` value ("cover", "24px 24px"). The grid and hatch
+    /// washes several designs use are a tiled gradient, so without this they
+    /// paint as one stretched stripe instead of a texture.
+    public var fillSize: String?
     public var textColor: String?
     /// 0–100, like the dashboard's opacity inputs.
     public var opacity: Double?
@@ -62,6 +67,14 @@ public struct BlockStyle: Codable, Sendable, Equatable {
     public var lineHeight: Double?
     public var textTransform: String?
     public var decoration: String?
+    /// Line-breaking preference for headlines ("balance", "pretty").
+    ///
+    /// Decoded and merged so the field survives a round trip, but SwiftUI
+    /// exposes no line-breaking strategy, so it does not change layout here.
+    /// It is a typographic nicety — where the ragged edge falls — not a
+    /// design that reads differently, which is why it is carried rather
+    /// than approximated with a guess about where to break.
+    public var textWrap: String?
     public var nowrap: Bool?
     /// Gap between a container's children.
     public var gap: Double?
@@ -83,7 +96,16 @@ public struct BlockStyle: Codable, Sendable, Equatable {
     public var selfAlign: String?
     public var shadow: String?
     public var blur: Double?
+    /// Raw CSS clip-path — starbursts and ticket notches. Only the
+    /// `polygon(...)` form the designs use is drawn; anything else is
+    /// carried but not clipped.
+    public var clipPath: String?
     public var rotate: Double?
+    /// CSS `translate` value ("-50% 0") — the designs centre pinned badges
+    /// with left:50% + translateX(-50%). Kept apart from `rotate`'s
+    /// transform, and resolved against the block's OWN size, so a
+    /// percentage means what CSS means by it.
+    public var translate: String?
     /// Placement inside a `stack` container. `inset` fills the stack; the
     /// individual offsets pin an edge. Ignored outside a stack.
     public var inset: Bool?
@@ -101,7 +123,7 @@ public struct BlockStyle: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else { return }
         func d<T: Decodable>(_ key: CodingKeys) -> T? { try? c.decodeIfPresent(T.self, forKey: key) }
-        fill = d(.fill); textColor = d(.textColor); opacity = d(.opacity)
+        fill = d(.fill); fillSize = d(.fillSize); textColor = d(.textColor); opacity = d(.opacity)
         borderColor = d(.borderColor); borderWidth = d(.borderWidth)
         borderTop = d(.borderTop); borderRight = d(.borderRight)
         borderBottom = d(.borderBottom); borderLeft = d(.borderLeft)
@@ -113,11 +135,12 @@ public struct BlockStyle: Codable, Sendable, Equatable {
         fontSize = d(.fontSize); fontWeight = d(.fontWeight); fontFamily = d(.fontFamily)
         fontStyle = d(.fontStyle); align = d(.align); letterSpacing = d(.letterSpacing)
         lineHeight = d(.lineHeight); textTransform = d(.textTransform); decoration = d(.decoration)
-        nowrap = d(.nowrap); gap = d(.gap); height = d(.height); minHeight = d(.minHeight)
+        textWrap = d(.textWrap); nowrap = d(.nowrap); gap = d(.gap); height = d(.height); minHeight = d(.minHeight)
         width = d(.width); maxWidth = d(.maxWidth); aspectRatio = d(.aspectRatio)
         flex = d(.flex); shrink = d(.shrink); basis = d(.basis); wrap = d(.wrap)
         justify = d(.justify); items = d(.items); selfAlign = d(.selfAlign)
         shadow = d(.shadow); blur = d(.blur); rotate = d(.rotate)
+        clipPath = d(.clipPath); translate = d(.translate)
         inset = d(.inset); top = d(.top); right = d(.right); bottom = d(.bottom); left = d(.left)
         zIndex = d(.zIndex); overflow = d(.overflow)
     }
@@ -128,6 +151,7 @@ public struct BlockStyle: Codable, Sendable, Equatable {
         guard let other else { return self }
         var out = self
         if other.fill != nil { out.fill = other.fill }
+        if other.fillSize != nil { out.fillSize = other.fillSize }
         if other.textColor != nil { out.textColor = other.textColor }
         if other.opacity != nil { out.opacity = other.opacity }
         if other.borderColor != nil { out.borderColor = other.borderColor }
@@ -158,6 +182,7 @@ public struct BlockStyle: Codable, Sendable, Equatable {
         if other.lineHeight != nil { out.lineHeight = other.lineHeight }
         if other.textTransform != nil { out.textTransform = other.textTransform }
         if other.decoration != nil { out.decoration = other.decoration }
+        if other.textWrap != nil { out.textWrap = other.textWrap }
         if other.nowrap != nil { out.nowrap = other.nowrap }
         if other.gap != nil { out.gap = other.gap }
         if other.height != nil { out.height = other.height }
@@ -174,7 +199,9 @@ public struct BlockStyle: Codable, Sendable, Equatable {
         if other.selfAlign != nil { out.selfAlign = other.selfAlign }
         if other.shadow != nil { out.shadow = other.shadow }
         if other.blur != nil { out.blur = other.blur }
+        if other.clipPath != nil { out.clipPath = other.clipPath }
         if other.rotate != nil { out.rotate = other.rotate }
+        if other.translate != nil { out.translate = other.translate }
         if other.inset != nil { out.inset = other.inset }
         if other.top != nil { out.top = other.top }
         if other.right != nil { out.right = other.right }
