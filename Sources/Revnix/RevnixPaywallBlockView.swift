@@ -378,6 +378,25 @@ private struct BlockStyleModifier: ViewModifier {
             // 9999 is the designs' "fully round" idiom.
             view = AnyView(view.clipShape(RoundedRectangle(cornerRadius: min(radius, 999))))
         }
+        // A polygon clip — starbursts, ticket notches, chevron rails. Applied
+        // after the fill so it cuts the painted surface, and after the corner
+        // radius because a design never asks for both on one block.
+        if let polygon = revnixParsePolygon(s.clipPath) {
+            view = AnyView(view.clipShape(RevnixPolygonShape(points: polygon)))
+        } else if let spec = s.clipPath, !spec.isEmpty {
+            // A clip form this build cannot draw leaves the block its full
+            // rectangle, which is the safe direction: too much is visible
+            // rather than the block being clipped away to nothing.
+            onDiagnostic?("clipPath not drawn: \(spec)")
+        }
+        // A `fill` this SDK cannot TILE. The gradient still paints, so the
+        // block keeps its colour, but a repeating wash (dot grids, graph-paper
+        // hairlines) stretches into a single band instead of a texture. Kept
+        // visible and reported rather than silently dropped, which is what the
+        // field did before it was decoded at all.
+        if case .tile = revnixParseFillSize(s.fillSize), s.fill?.contains("gradient") == true {
+            onDiagnostic?("fillSize not tiled: \(s.fillSize ?? "")")
+        }
         if let width = s.borderWidth ?? (s.borderColor != nil ? 1 : nil) {
             let colour = revnixBlockStrokeColor(s.borderColor, doc, onDiagnostic: onDiagnostic)
                 ?? revnixBlockColor(doc.textColor, doc) ?? .primary
@@ -394,6 +413,13 @@ private struct BlockStyleModifier: ViewModifier {
 
         if let opacity = s.opacity { view = AnyView(view.opacity(opacity / 100)) }
         if let rotate = s.rotate { view = AnyView(view.rotationEffect(.degrees(rotate))) }
+        // CSS `translate`, resolved against the block's OWN size. It runs
+        // before the margins and the stack offsets below so it composes with
+        // them the way the browser does: `left: 50%` pins the edge, then this
+        // pulls the block back by half its own width to centre it.
+        if let translate = revnixParseTranslate(s.translate) {
+            view = AnyView(view.modifier(RevnixTranslateModifier(translate: translate)))
+        }
         if let shadow = s.shadow, revnixBlockColor(shadow, doc) != nil || shadow.contains("rgba") {
             view = AnyView(view.shadow(color: .black.opacity(0.25), radius: 12, y: 4))
         }
