@@ -40,6 +40,11 @@ let client = RevnixClient(RevnixConfig(
     baseURL: URL(string: "https://your-deployment.convex.site")!
 ))
 
+// Every resolvePlacement carries the device facts (platform, OS/app version,
+// locale, currency, App Store storefront, model, install date, sandbox, first
+// open) — RevnixConfig(device:) defaults to DeviceFacts.detect(); pass nil to
+// send nothing. Targeting rules use them from the first launch.
+
 // At app launch: replay store transactions + drain the offline queue.
 let observer = RevnixStoreKit.startObserving(client: client)
 await client.retryPendingPurchases()

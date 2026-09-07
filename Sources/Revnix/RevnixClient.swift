@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(StoreKit)
+    import StoreKit
+#endif
 
 /// Core client — a faithful port of revnix-react's resilience policy
 /// (revnix-sdk `resilience.test.ts` is the behavioral spec):
@@ -25,6 +28,10 @@ public actor RevnixClient {
 
     private var inflightEntitlements: Task<CustomerEntitlements, Error>?
     private var bgFailures = 0
+    /// REV-268: the encoded X-Revnix-Device value, built on the first resolve
+    /// and kept for the client's lifetime (so `firstOpen` holds for the whole
+    /// first session). `.some(nil)` = facts disabled or unencodable.
+    private var deviceHeader: String??
 
     public init(_ config: RevnixConfig) {
         self.config = config
@@ -271,9 +278,17 @@ public actor RevnixClient {
         do {
             // REV-219: the customer id lets the server pin a sticky experiment
             // variant; older servers simply ignore the parameter.
+            // REV-268: the device facts ride along so targeting rules see THIS
+            // device on THIS request, and the server stores them as
+            // device.* attributes. Older servers ignore the header.
+            var headers: [String: String] = [:]
+            if let header = await currentDeviceHeader() {
+                headers["X-Revnix-Device"] = header
+            }
             let data = try await request(
                 path: "/v1/placements/\(encode(key))/offering", method: "GET",
-                query: [URLQueryItem(name: "customer", value: customerId())])
+                query: [URLQueryItem(name: "customer", value: customerId())],
+                headers: headers)
             let resolution = try decode(PlacementResolution.self, from: data)
             // Cache the wire bytes themselves (as revnix-kotlin does), not a
             // re-encode: offline then sees exactly the document the server
@@ -290,6 +305,46 @@ public actor RevnixClient {
             else { throw err }
             return resolution
         }
+    }
+
+    /// REV-268: assemble the device facts once. `installedAt` is the first
+    /// launch this storage ever saw — written then, read back on every later
+    /// one — and `firstOpen` is true for the whole of that first session. The
+    /// storefront is asked of StoreKit once, unless the app set it.
+    private func currentDeviceHeader() async -> String? {
+        if let built = deviceHeader { return built }
+        guard var facts = config.device else {
+            deviceHeader = .some(nil)
+            return nil
+        }
+        if facts.storefront == nil {
+            facts.storefront = await Self.storefrontCountry()
+        }
+        let installedAt: Int
+        let firstOpen: Bool
+        if let stored = config.storage.get(Keys.installedAt).flatMap(Int.init), stored > 0 {
+            installedAt = stored
+            firstOpen = false
+        } else {
+            installedAt = nowMs()
+            firstOpen = true
+            config.storage.set(Keys.installedAt, String(installedAt))
+        }
+        let built = facts.encodedHeader(
+            sdkVersion: Self.sdkVersion, installedAt: installedAt, firstOpen: firstOpen)
+        deviceHeader = .some(built)
+        return built
+    }
+
+    /// The App Store storefront's country (alpha-3), or nil where StoreKit
+    /// has no store to ask — tests, or a process with no App Store account.
+    private static func storefrontCountry() async -> String? {
+        #if canImport(StoreKit)
+            if #available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *) {
+                return await Storefront.current?.countryCode
+            }
+        #endif
+        return nil
     }
 
     /// Fire-and-forget install beacon; once per customer id.
@@ -439,11 +494,12 @@ public actor RevnixClient {
 
     // MARK: - Transport
 
-    public static let sdkVersion = "0.2.0"
+    public static let sdkVersion = "0.3.0"
 
     private func request(
         path: String, method: String, query: [URLQueryItem]? = nil,
-        body: [String: JSONValue]? = nil
+        body: [String: JSONValue]? = nil,
+        headers: [String: String] = [:]
     ) async throws -> Data {
         var url = config.baseURL.appendingPathComponent(path)
         if let query,
@@ -457,6 +513,7 @@ public actor RevnixClient {
         req.timeoutInterval = config.timeout
         req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("revnix-swift/\(Self.sdkVersion)", forHTTPHeaderField: "X-Revnix-SDK")
+        for (name, value) in headers { req.setValue(value, forHTTPHeaderField: name) }
         if bgFailures > 0 {
             // Server-visible client pain with zero app wiring.
             req.setValue(String(bgFailures), forHTTPHeaderField: "X-Revnix-Bg-Failures")
@@ -534,6 +591,7 @@ public actor RevnixClient {
         static let wallClock = "revnix.lastWallClock"
         static let queue = "revnix.pendingPurchases"
         static let cacheIndex = "revnix.entIndex"
+        static let installedAt = "revnix.installedAt"
         static func cache(_ cid: String) -> String { "revnix.ent.\(cid)" }
         static func placement(_ key: String) -> String { "revnix.placement.\(key)" }
         static func installReported(_ cid: String) -> String {

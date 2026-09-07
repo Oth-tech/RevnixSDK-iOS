@@ -31,6 +31,13 @@ public struct RevnixConfig: Sendable {
     public var now: @Sendable () -> Date
     /// Injectable session for tests (URLProtocol stubs).
     public var session: URLSession?
+    /// REV-268: facts about the device, sent with every placement resolve so
+    /// targeting rules can be evaluated on the request that serves the
+    /// paywall, and stored on the customer as reserved `device.*` attributes.
+    /// Defaults to `DeviceFacts.detect()`; adjust the fields you know better
+    /// (an app that reads its own version from elsewhere), or pass `nil` to
+    /// send nothing.
+    public var device: DeviceFacts?
 
     public init(
         apiKey: String,
@@ -42,7 +49,8 @@ public struct RevnixConfig: Sendable {
         readYourWritesDelays: [TimeInterval] = [0.25, 0.5, 1, 2],
         onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
-        session: URLSession? = nil
+        session: URLSession? = nil,
+        device: DeviceFacts? = DeviceFacts.detect()
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -54,5 +62,6 @@ public struct RevnixConfig: Sendable {
         self.onDiagnostic = onDiagnostic
         self.now = now
         self.session = session
+        self.device = device
     }
 }
