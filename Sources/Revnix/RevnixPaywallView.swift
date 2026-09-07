@@ -230,6 +230,8 @@ public struct RevnixPaywallView: View {
     /// An explicit sink for render diagnostics, for a host that renders
     /// without passing `client`. When both are given both are called.
     private let onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)?
+    /// REV-271: which language a designed paywall draws its copy in.
+    private let locale: String?
 
     @State private var internalSelected: String?
     @State private var didReportView = false
@@ -258,6 +260,13 @@ public struct RevnixPaywallView: View {
     ///     appearance (REV-094); `placementKey`/`paywallId` are the
     ///     attribution attached to the report, and `disableViewTracking`
     ///     opts out while still passing `client`.
+    ///   - locale: REV-271. Which language to draw a designed paywall's copy
+    ///     in. Omit and the device's own is used, which is what makes the
+    ///     paywall match the rest of the app; pass one when the app has its
+    ///     own in-app language switch, so the paywall follows the app rather
+    ///     than the OS. A paywall with no translations ignores it, and any
+    ///     string the chosen language does not translate falls back to the
+    ///     authored copy rather than rendering blank.
     public init(
         config: PaywallConfig,
         packages: [RevnixPaywallPackage],
@@ -274,7 +283,8 @@ public struct RevnixPaywallView: View {
         placementKey: String? = nil,
         paywallId: String? = nil,
         disableViewTracking: Bool = false,
-        onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil
+        onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
+        locale: String? = nil
     ) {
         self.config = config
         self.packages = packages
@@ -287,6 +297,7 @@ public struct RevnixPaywallView: View {
         self.onPrivacy = onPrivacy
         self.onClose = onClose
         self.themeOverride = theme
+        self.locale = locale
         self.client = client
         self.placementKey = placementKey
         self.paywallId = paywallId
@@ -419,7 +430,10 @@ public struct RevnixPaywallView: View {
         // published before the block builder — so anything already live
         // renders unchanged.
         if let blockDoc = config.blocks {
-            blockScreen(blockDoc)
+            // REV-271: the language overlay is applied ONCE, here, so every
+            // view below reads plain strings and none of them can forget to
+            // localize one. A paywall with no translations returns itself.
+            blockScreen(blockDoc.localized(locale ?? revnixDeviceLocale()))
         } else {
             classicBody
         }

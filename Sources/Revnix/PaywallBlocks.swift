@@ -689,6 +689,10 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
     public var accentInk: String
     public var fontFamily: String?
     public var blocks: [PaywallBlock]
+    /// REV-271: the design's translations. Empty for a paywall published in
+    /// one language, which is every paywall written before this shipped —
+    /// `localized(_:)` is then a no-op and the tree renders as authored.
+    public var localization: PaywallLocalization
     /// The document exactly as it was published, used for re-encoding.
     public var raw: RevnixJSONValue
 
@@ -698,6 +702,7 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
 
     private enum Keys: String, CodingKey {
         case version, layout, background, textColor, accent, accentInk, fontFamily, blocks
+        case defaultLocale, locales
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -726,6 +731,20 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
         accent = ((try? c.decodeIfPresent(String.self, forKey: .accent)) as? String) ?? "#6478ff"
         accentInk = ((try? c.decodeIfPresent(String.self, forKey: .accentInk)) as? String) ?? "#FFFFFF"
         fontFamily = try? c.decodeIfPresent(String.self, forKey: .fontFamily)
+        // REV-271: a malformed table costs the translations, never the
+        // paywall — the same forgiveness every other optional field here
+        // gets. Tags are normalized on the way IN so a hand-written "es_mx"
+        // in the catalog still matches a device reporting "es-MX".
+        var tables: [String: [String: String]] = [:]
+        let raw = (try? c.decodeIfPresent([String: [String: String]].self, forKey: .locales)) ?? nil
+        for (tag, table) in raw ?? [:] {
+            guard let normalized = revnixNormalizeLocale(tag) else { continue }
+            tables[normalized] = table
+        }
+        localization = PaywallLocalization(
+            defaultLocale: (try? c.decodeIfPresent(String.self, forKey: .defaultLocale)) ?? nil,
+            tables: tables
+        )
     }
 }
 
