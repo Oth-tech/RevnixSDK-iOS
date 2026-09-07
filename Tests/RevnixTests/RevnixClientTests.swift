@@ -43,7 +43,8 @@ final class RevnixClientTests: XCTestCase {
         timeout: TimeInterval = 10,
         entitlementsTTL: TimeInterval = 30,
         readYourWritesDelays: [TimeInterval] = [0.25, 0.5, 1, 2],
-        onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil
+        onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
+        device: DeviceFacts? = RevnixClientTests.fixedDevice
     ) -> RevnixClient {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [StubProtocol.self]
@@ -57,8 +58,24 @@ final class RevnixClientTests: XCTestCase {
                 readYourWritesDelays: readYourWritesDelays,
                 onDiagnostic: onDiagnostic,
                 now: now,
-                session: URLSession(configuration: sessionConfig)
+                session: URLSession(configuration: sessionConfig),
+                device: device
             ))
+    }
+
+    /// REV-268: a fixed device so the header is deterministic. The storefront
+    /// is set explicitly so the client never asks StoreKit under test.
+    static let fixedDevice = DeviceFacts(
+        platform: "ios", osVersion: "18.1", appVersion: "1.2.10", locale: "en_US",
+        currency: "USD", storefront: "USA", model: "iPhone15,3", sandbox: true)
+
+    /// Decode the base64url JSON the client put in X-Revnix-Device.
+    static func decodeDeviceHeader(_ header: String) throws -> [String: JSONValue] {
+        var base64 = header.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64 += "=" }
+        let data = try XCTUnwrap(Data(base64Encoded: base64))
+        return try JSONDecoder().decode([String: JSONValue].self, from: data)
     }
 
     // MARK: - Request timeout (spec: "C7 request timeout")
@@ -521,6 +538,64 @@ final class RevnixClientTests: XCTestCase {
             PlacementExperiment(key: "summer-pricing", variantId: "var_b"))
         let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/placements"))
         XCTAssertTrue(path.hasSuffix("/offering?customer=cust%20one"), path)
+    }
+
+    // MARK: - Device attribute contract (REV-268)
+
+    /// Every resolve carries the device facts, base64url-encoded, with the
+    /// three SDK-owned fields added: sdkVersion, installedAt, firstOpen.
+    func testResolvePlacementSendsDeviceFactsHeader() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.placementBody)
+        let storage = MemoryStorage()
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let client = makeClient(now: { fixedNow }, storage: storage)
+        _ = try await client.resolvePlacement("main")
+        let header = try XCTUnwrap(
+            StubProtocol.lastHeader("X-Revnix-Device", containing: "/placements"))
+        let facts = try Self.decodeDeviceHeader(header)
+        XCTAssertEqual(facts["platform"], .string("ios"))
+        XCTAssertEqual(facts["osVersion"], .string("18.1"))
+        XCTAssertEqual(facts["appVersion"], .string("1.2.10"))
+        XCTAssertEqual(facts["locale"], .string("en_US"))
+        XCTAssertEqual(facts["currency"], .string("USD"))
+        XCTAssertEqual(facts["storefront"], .string("USA"))
+        XCTAssertEqual(facts["model"], .string("iPhone15,3"))
+        XCTAssertEqual(facts["sandbox"], .bool(true))
+        XCTAssertEqual(facts["sdkVersion"], .string(RevnixClient.sdkVersion))
+        XCTAssertEqual(facts["installedAt"], .number(1_700_000_000_000))
+        XCTAssertEqual(facts["firstOpen"], .bool(true))
+        XCTAssertEqual(storage.get("revnix.installedAt"), "1700000000000")
+
+        // A later session on the same storage: same install date, no longer
+        // the first open.
+        let later = makeClient(
+            now: { fixedNow.addingTimeInterval(86_400) }, storage: storage)
+        _ = try await later.resolvePlacement("main")
+        let second = try Self.decodeDeviceHeader(
+            try XCTUnwrap(
+                StubProtocol.lastHeader("X-Revnix-Device", containing: "/placements")))
+        XCTAssertEqual(second["installedAt"], .number(1_700_000_000_000))
+        XCTAssertEqual(second["firstOpen"], .bool(false))
+    }
+
+    /// `device: nil` sends nothing — the header is absent, not empty.
+    func testDeviceFactsCanBeDisabled() async throws {
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.placementBody)
+        let client = makeClient(device: nil)
+        _ = try await client.resolvePlacement("main")
+        XCTAssertNil(StubProtocol.lastHeader("X-Revnix-Device", containing: "/placements"))
+    }
+
+    /// `detect()` answers from the running process: a platform name, an OS
+    /// version and a locale exist on every Apple platform the tests run on.
+    func testDetectFillsProcessFacts() {
+        let facts = DeviceFacts.detect()
+        XCTAssertEqual(facts.platform, DeviceFacts.platformName)
+        XCTAssertNotNil(facts.osVersion)
+        XCTAssertNotNil(facts.locale)
+        XCTAssertNil(facts.storefront, "storefront is StoreKit's, asked lazily")
     }
 
     /// `experiment` is null when nothing is running, and absent entirely on
