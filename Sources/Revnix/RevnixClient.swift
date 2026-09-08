@@ -32,6 +32,48 @@ public actor RevnixClient {
     /// and kept for the client's lifetime (so `firstOpen` holds for the whole
     /// first session). `.some(nil)` = facts disabled or unencodable.
     private var deviceHeader: String??
+    // REV-272: implicit placements. Off unless the host said what to do with a
+    // paywall — without a handler there is nothing to do with the answer, and
+    // firing anyway would spend requests and ledger rows on nobody's behalf.
+    private var implicitEnabled: Bool { config.implicitPlacementsEnabled }
+    /// Which of the six this app has configured. One in-flight task, coalesced;
+    /// a SUCCESS is memoised for the client's lifetime (the task keeps its
+    /// value), a FAILURE clears the field so the next moment asks again — an
+    /// offline cold start must not disable every implicit moment until the
+    /// next launch. `implicitConfigRetryAt` keeps that retry from happening on
+    /// every paywall close of an offline session: one probe per minute.
+    private var implicitConfigTask: Task<Set<String>, Error>?
+    private var implicitConfigRetryAt: Date = .distantPast
+    private var lifecycleCancel: (@Sendable () -> Void)?
+    /// When the app last went to the BACKGROUND, or nil while it has not. A
+    /// return after `config.sessionTimeout` away is a new session; sooner is
+    /// an app switch. Measured from the background transition, not from the
+    /// last return — the latter would mint a session after 35 minutes of
+    /// continuous use plus a three-second switch.
+    private var lastBackgroundAt: Date?
+    /// LOOP GUARD: view ids of displays that came FROM an implicit trigger. A
+    /// paywall shown because a paywall was dismissed must not itself fire
+    /// `paywall_decline`, or the customer is handed the same screen forever.
+    /// Never released — a double-tapped close reports two closes on one id,
+    /// and releasing on the first would let the second re-enter the loop.
+    /// Bounded by implicit displays per process: a handful of ids.
+    private var implicitViewIds: Set<String> = []
+    /// True once `start()` ran; `stop()` resets it so the pair is symmetric.
+    private var implicitStarted = false
+    /// Set by `stop()`. Checked after every suspension point on the implicit
+    /// paths — a launch batch that was mid-flight when the client was retired
+    /// must not hand a paywall to a host that has moved on.
+    private var implicitStopped = false
+    /// The cold-start batch while it runs, resolving to whether it presented.
+    /// A deep link delivered on the first frame (SwiftUI's onOpenURL) waits
+    /// for it, or the customer gets the launch paywall AND the link paywall.
+    private var launchBatch: Task<Bool, Never>?
+    /// True when `customerId()` minted the id on THIS launch — the install
+    /// signal, the same one `/v1/installs` uses. In memory on purpose: a
+    /// stored "seen this id" marker would fire `app_install` for the entire
+    /// existing base on the first launch after an SDK upgrade, and again
+    /// after every `logout()`.
+    private var mintedThisLaunch = false
 
     public init(_ config: RevnixConfig) {
         self.config = config
@@ -42,7 +84,269 @@ public actor RevnixClient {
             c.timeoutIntervalForRequest = config.timeout
             self.session = URLSession(configuration: c)
         }
+        if config.implicitPlacementsEnabled {
+            // REV-272: kicked off rather than awaited — a launch must never
+            // wait on /v1/config, and every implicit path is fire-and-forget
+            // from here down. Weak, so a client the host discards right after
+            // construction is not kept alive by its own launch work.
+            Task { [weak self] in await self?.start() }
+        }
     }
+
+    deinit {
+        // The NotificationCenter observers outlive the reference otherwise —
+        // one dead pair per client a SwiftUI host rebuilt, forever.
+        lifecycleCancel?()
+    }
+
+    // MARK: - Implicit placements (REV-272)
+
+    /// Begin watching for the six implicit moments. Called automatically from
+    /// `init` when implicit placements are on; idempotent, and `stop()` makes
+    /// it callable again, so a host driving its own lifecycle can pair them.
+    ///
+    /// A cold start is always both a launch AND a session — an operator who
+    /// configured only `session_start` still wants the first one — and it is
+    /// an install too when this launch minted the customer id. The three run
+    /// in order, most specific first, and only the first that resolves to a
+    /// paywall is handed to the host. All are still REPORTED — a launch is a
+    /// launch whether or not a paywall showed — but an app that configured
+    /// all three must not have three paywalls pushed onto its first frame.
+    public func start() async {
+        guard implicitEnabled, !implicitStarted else { return }
+        implicitStarted = true
+        implicitStopped = false
+
+        // Subscribed BEFORE the batch, which can take a full network timeout
+        // when offline: a customer who backgrounds the app during that window
+        // and comes back an hour later is a session, and missing the
+        // background transition would lose it.
+        lifecycleCancel = config.lifecycle.onStateChange { [weak self] state in
+            guard let self else { return }
+            Task { await self.appStateChanged(state) }
+        }
+
+        // `customerId()` is what sets mintedThisLaunch, so it runs first.
+        _ = customerId()
+        var moments: [RevnixImplicitPlacement] = []
+        if mintedThisLaunch { moments.append(.appInstall) }
+        moments.append(.appLaunch)
+        moments.append(.sessionStart)
+
+        let batch = Task<Bool, Never> { [weak self] in
+            var presented = false
+            for placement in moments {
+                guard let self else { return presented }
+                let shown = await self.fireImplicit(placement, present: !presented)
+                presented = presented || shown
+            }
+            return presented
+        }
+        launchBatch = batch
+        _ = await batch.value
+        launchBatch = nil
+    }
+
+    /// Stop watching. A replaced client would otherwise keep a foreground
+    /// observer alive and mint a session on every return alongside its
+    /// successor. Anything mid-flight (the launch batch, a config read) is
+    /// told to hand nothing over.
+    public func stop() {
+        implicitStopped = true
+        implicitStarted = false
+        lifecycleCancel?()
+        lifecycleCancel = nil
+        implicitConfigTask?.cancel()
+        implicitConfigTask = nil
+    }
+
+    /// Hand the SDK the URL that opened your app, from wherever you already
+    /// receive it (`onOpenURL`, `application(_:open:options:)`, your router).
+    ///
+    /// This is the one implicit moment the SDK cannot see for itself — the URL
+    /// goes to your entry point, and an SDK intercepting it would be fighting
+    /// your router. Does nothing unless `deeplink_open` is configured in the
+    /// dashboard. Delivered on the first frame, while the cold-start batch is
+    /// still deciding what to show, it waits for the batch and presents only
+    /// if the batch showed nothing — the moment is reported either way.
+    public func handleDeepLink(_ url: URL) async {
+        let extra: [String: JSONValue] = [
+            "url": .string(String(url.absoluteString.prefix(1024))),
+        ]
+        var present = true
+        if let batch = launchBatch { present = !(await batch.value) }
+        _ = await fireImplicit(.deeplinkOpen, extra: extra, present: present)
+    }
+
+    private func appStateChanged(_ state: RevnixAppState) async {
+        guard !implicitStopped else { return }
+        switch state {
+        case .background:
+            // First report wins: a platform that repeats "background" must not
+            // keep resetting the clock forward.
+            if lastBackgroundAt == nil { lastBackgroundAt = config.now() }
+        case .foreground:
+            // A foreground with no background before it is the launch itself,
+            // which the batch already counted — or a duplicate report.
+            guard let since = lastBackgroundAt else { return }
+            lastBackgroundAt = nil
+            // An app switch is not a session.
+            if config.now().timeIntervalSince(since) >= config.sessionTimeout {
+                // A new session is also when the memoised config is re-asked:
+                // the server promises an operator's change shows up within
+                // ~30 s, and a process backgrounded for days would otherwise
+                // keep firing a moment the operator turned off — or never
+                // fire one they turned on — until the next cold start.
+                implicitConfigTask = nil
+                _ = await fireImplicit(.sessionStart)
+            }
+        }
+    }
+
+    /// Which of the six this app has configured. See `implicitConfigTask`.
+    private func implicitConfig() async -> Set<String> {
+        if implicitConfigTask == nil, config.now() < implicitConfigRetryAt {
+            // Inside the hold after a failure: answer "none" without a request.
+            return []
+        }
+        let task = implicitConfigTask ?? Task { [self] in
+            // The id does not change the answer — this route is
+            // customer-independent — it only picks the server's rate-limit
+            // bucket, so one busy app cannot 429 its own fleet off the feature.
+            let data = try await request(
+                path: "/v1/config", method: "GET",
+                query: [URLQueryItem(name: "customer", value: customerId())])
+            let body = try decode(ImplicitConfigResponse.self, from: data)
+            return Set(body.implicitPlacements ?? [])
+        }
+        implicitConfigTask = task
+        do {
+            return try await task.value
+        } catch {
+            if implicitConfigTask == task { implicitConfigTask = nil }
+            implicitConfigRetryAt = config.now().addingTimeInterval(Self.implicitConfigRetryHold)
+            bgFailures += 1
+            diagnostic(op: "implicitConfig", message: "\(error)")
+            return []
+        }
+    }
+
+    /// How long after a FAILED config read the next moment is answered "none"
+    /// without a request. An offline burst of paywall interactions then costs
+    /// one probe, while a deep link opened later on good network still works.
+    private static let implicitConfigRetryHold: TimeInterval = 60
+
+    /// Report one implicit moment and present whatever it resolves to. Returns
+    /// true when a paywall was handed to the host. `present` false still
+    /// reports the moment (its ledger event is a fact either way) but hands
+    /// nothing over — how the launch batch keeps a cold start to ONE paywall.
+    /// Never throws: this runs on a launch and on every return to the
+    /// foreground, so it must not throw into the host.
+    @discardableResult
+    private func fireImplicit(
+        _ placement: RevnixImplicitPlacement,
+        extra: [String: JSONValue] = [:],
+        present: Bool = true
+    ) async -> Bool {
+        guard implicitEnabled, !implicitStopped else { return false }
+        let configured = await implicitConfig()
+        // The common case for five of the six in most apps: nothing attached,
+        // so nothing is sent and no ledger row is written.
+        guard configured.contains(placement.rawValue), !implicitStopped else {
+            return false
+        }
+
+        var body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "placement": .string(placement.rawValue),
+            // One id per occurrence: retries of the same launch are absorbed,
+            // a genuine second launch counts separately. Required server-side
+            // for the three moments that append an event.
+            "occurrenceId": .string(UUID().uuidString.lowercased()),
+            "occurredAt": .number(Double(nowMs())),
+            "sdkVersion": .string(Self.sdkVersion),
+        ]
+        for (k, v) in extra { body[k] = v }
+        do {
+            let data = try await request(
+                path: "/v1/placements/triggered", method: "POST", body: body,
+                headers: await deviceHeaders())
+            // The route's own body shape, decoded ONCE: the resolve fields are
+            // optional because an unconfigured moment answers 200 with
+            // `paywall: null` and no `status`/`revision` at all — a normal
+            // state, not a decode failure to count against the server.
+            let response = try decode(ImplicitTriggerResponse.self, from: data)
+            guard !implicitStopped, present,
+                let resolution = response.resolution, resolution.paywall != nil
+            else { return false }
+            let trigger = RevnixImplicitTrigger(placement: placement, resolution: resolution)
+            // Presenting is UI. The host's handler runs on the main actor so a
+            // `UIViewController.present` or a `@Published` write inside it is
+            // not a background-thread crash.
+            if let handler = config.onImplicitPaywall {
+                await MainActor.run { handler(trigger) }
+            }
+            return true
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "implicit:\(placement.rawValue)", message: "\(error)")
+            return false
+        }
+    }
+
+    /// The two moments that happen ON a paywall, with the loop guard applied.
+    /// `fromPaywallId` travels so the server can refuse to hand back the very
+    /// paywall being dismissed.
+    private func fireImplicitFromPaywall(
+        _ placement: RevnixImplicitPlacement, viewId: String, paywallId: String?
+    ) async {
+        guard implicitEnabled else { return }
+        // One hop, never a chain: this display was itself implicit.
+        if implicitViewIds.contains(viewId) { return }
+        var extra: [String: JSONValue] = ["fromViewId": .string(viewId)]
+        if let v = paywallId { extra["fromPaywallId"] = .string(v) }
+        _ = await fireImplicit(placement, extra: extra)
+    }
+
+    /// The `X-Revnix-Device` header for a request that resolves a placement —
+    /// the resolve route and the implicit trigger route attach the same one,
+    /// so a rule reading `device.appVersion` sees the same value either way.
+    private func deviceHeaders() async -> [String: String] {
+        guard let header = await currentDeviceHeader() else { return [:] }
+        return ["X-Revnix-Device": header]
+    }
+
+    private struct ImplicitConfigResponse: Decodable {
+        let implicitPlacements: [String]?
+    }
+
+    /// POST /v1/placements/triggered body: the resolve shape with every field
+    /// optional, plus the two the route adds. `resolution` is non-nil only when
+    /// the server actually resolved (status "ok" with an offering).
+    private struct ImplicitTriggerResponse: Decodable {
+        let skipReason: String?
+        let recorded: Bool?
+        let resolution: PlacementResolution?
+
+        private enum CodingKeys: String, CodingKey {
+            case skipReason, recorded, status
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            skipReason = try c.decodeIfPresent(String.self, forKey: .skipReason)
+            recorded = try c.decodeIfPresent(Bool.self, forKey: .recorded)
+            // Only a resolved answer carries `status`; the not_configured
+            // branch omits it (and nulls revision/offering), so decoding the
+            // strict model there would be the badResponse this avoids.
+            if try c.decodeIfPresent(String.self, forKey: .status) == "ok" {
+                resolution = try PlacementResolution(from: decoder)
+            } else {
+                resolution = nil
+            }
+        }
+    }
+
 
     // MARK: - Identity
 
@@ -50,6 +354,9 @@ public actor RevnixClient {
         if let existing = config.storage.get(Keys.customerId) { return existing }
         let minted = generateAnonymousId()
         config.storage.set(Keys.customerId, minted)
+        // REV-272: the install signal. `logout()` below deliberately does not
+        // set it — a new anonymous session is not a new install.
+        mintedThisLaunch = true
         return minted
     }
 
@@ -281,14 +588,10 @@ public actor RevnixClient {
             // REV-268: the device facts ride along so targeting rules see THIS
             // device on THIS request, and the server stores them as
             // device.* attributes. Older servers ignore the header.
-            var headers: [String: String] = [:]
-            if let header = await currentDeviceHeader() {
-                headers["X-Revnix-Device"] = header
-            }
             let data = try await request(
                 path: "/v1/placements/\(encode(key))/offering", method: "GET",
                 query: [URLQueryItem(name: "customer", value: customerId())],
-                headers: headers)
+                headers: await deviceHeaders())
             let resolution = try decode(PlacementResolution.self, from: data)
             // Cache the wire bytes themselves (as revnix-kotlin does), not a
             // re-encode: offline then sees exactly the document the server
@@ -388,6 +691,18 @@ public actor RevnixClient {
     @discardableResult
     public func logPaywallDisplay(placementKey: String?, paywallId: String?) async -> String? {
         let viewId = UUID().uuidString.lowercased()
+        // REV-272 LOOP GUARD: a display whose placement is one of the six came
+        // FROM an implicit trigger, so its dismissal must not fire another one
+        // — otherwise "show a win-back when a paywall is declined" hands the
+        // customer the same screen until they force-quit. Recognised from the
+        // placementKey the caller reports; a caller that reports none cannot
+        // be protected here, which is why the server keeps its own
+        // same-paywall backstop.
+        if implicitEnabled, let key = placementKey,
+            RevnixImplicitPlacement(rawValue: key) != nil
+        {
+            implicitViewIds.insert(viewId)
+        }
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
             "viewId": .string(viewId),
@@ -408,6 +723,13 @@ public actor RevnixClient {
     /// display's life. Idempotent per view id, exactly like the view report.
     ///
     /// Pass the id `logPaywallDisplay` returned for this display.
+    ///
+    /// A close is a DECLINE. Do not report one for a display that ended in a
+    /// purchase — with implicit placements on, a close is also the
+    /// `paywall_decline` moment, and a win-back offer seconds after a
+    /// successful purchase is the one thing an operator never means.
+    /// `RevnixPaywallView` only reports its close affordances, never a
+    /// purchase-driven dismissal.
     public func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
@@ -422,6 +744,11 @@ public actor RevnixClient {
             bgFailures += 1
             diagnostic(op: "logPaywallClosed", message: "\(error)")
         }
+        // REV-272: the dismissal IS the `paywall_decline` moment. No second
+        // ledger event — the server reuses the paywall.closed just reported —
+        // so this is only the resolve that decides what is attached to it.
+        await fireImplicitFromPaywall(
+            .paywallDecline, viewId: viewId, paywallId: paywallId)
     }
 
     /// Report one of the six paywall interactions (REV-263) — what the
@@ -473,6 +800,12 @@ public actor RevnixClient {
         } catch {
             bgFailures += 1
             diagnostic(op: "logPaywallEvent", message: "\(error)")
+        }
+        // REV-272: backing out of the store sheet is the `transaction_abandon`
+        // moment. Reuses the paywall.purchase_abandoned just reported.
+        if event == .purchaseAbandoned {
+            await fireImplicitFromPaywall(
+                .transactionAbandon, viewId: viewId, paywallId: paywallId)
         }
     }
 
