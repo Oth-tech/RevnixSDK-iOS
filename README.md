@@ -165,6 +165,21 @@ Beyond the calls shown above:
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions — `.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error` — i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
+| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`). The one implicit moment the SDK cannot see itself; does nothing unless `deeplink_open` is configured. |
+| `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. |
+
+### Implicit placements
+
+Six placements resolve without a `resolvePlacement` call: `app_install`,
+`app_launch`, `session_start`, `deeplink_open`, `paywall_decline` and
+`transaction_abandon`. Passing `onImplicitPaywall` to `RevnixConfig` turns
+them on (off by default — no handler, no extra requests); the SDK then asks
+`GET /v1/config` once and fires only for the moments the dashboard configured.
+The handler runs on the main actor, so present directly. When you present,
+pass `placementKey: trigger.resolution.placementKey` to `RevnixPaywallView`
+— that marks the display as implicit and is what stops a `paywall_decline`
+paywall from firing `paywall_decline` again. A close is a decline: never
+report one for a display that ended in a purchase.
 
 ### `RevnixConfig` knobs
 
@@ -178,6 +193,10 @@ Everything but `apiKey` and `baseURL` has a default:
 | `entitlementsTTL` | `30` s | Soft TTL on entitlement reads: a snapshot this fresh answers without a network round trip. `0` restores always-fetch. |
 | `readYourWritesDelays` | `[0.25, 0.5, 1, 2]` | Post-purchase entitlement poll schedule in seconds, jittered ±20%; empty disables polling. |
 | `onDiagnostic` | n/a | Callback for swallowed background failures. |
+| `onImplicitPaywall` | `nil` | The on-switch for implicit placements; called on the main actor with `RevnixImplicitTrigger { placement, resolution }`. |
+| `implicitPlacements` | `nil` | Explicit override of "on when a handler is present". |
+| `lifecycle` | `.system` | Foreground/background source for `session_start` (`didBecomeActive` / `didEnterBackground`); `.disabled` keeps launch-time moments only. |
+| `sessionTimeout` | `30 * 60` s | How long the app must be backgrounded for the return to count as a session. |
 | `now` / `session` | n/a | Injectable clock and `URLSession` for tests. |
 
 ## Resilience policy
