@@ -1,0 +1,254 @@
+# Release the Revnix Swift SDK.
+#
+# Dispatched by revnix-app's "Release SDKs" workflow on every merge to its
+# main, and runnable by hand. One run = one version: it moves `## Unreleased`
+# in CHANGELOG.md into a dated entry, bumps Revnix.podspec and
+# RevnixClient.sdkVersion, lands that through a pull request (the org ruleset
+# gives main merge commits only and no direct pushes, so there is no other way
+# in), then tags the merge commit and cuts a GitHub release.
+#
+# For Swift Package Manager that tag IS the release — there is no registry to
+# push to, Xcode resolves this repository directly. CocoaPods is a second,
+# optional channel: the pod is pushed only when COCOAPODS_TRUNK_TOKEN is set,
+# so the SPM release never fails on a CocoaPods outage or a missing token.
+#
+# The version always moves, even when nothing changed since the last tag —
+# the SDKs track revnix-app releases in lockstep by decision (2026-09-05).
+# A lockstep bump says so in the changelog entry it writes.
+
+name: Release
+run-name: "Release ${{ inputs.run_key || format('manual-{0}', github.run_id) }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump. auto reads the Unreleased section of CHANGELOG.md."
+        type: choice
+        options: [auto, major, minor, patch]
+        default: auto
+      app_sha:
+        description: "revnix-app commit this release rides on (recorded in the changelog)."
+        type: string
+        default: ""
+      run_key:
+        description: "Caller's correlation key; becomes the run name so the caller can find this run."
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One release at a time. A second dispatch queues behind the first so two
+# runs can never bump from the same base version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - name: Build and test main before touching it
+        run: swift test
+
+      # A previous run may have merged the bump and then failed before tagging.
+      # main is then one version ahead of the tags. Release that version
+      # instead of bumping past it and leaving a hole in the sequence.
+      - name: Is main already ahead of the tags?
+        id: pending
+        run: |
+          CURRENT=$(sed -n "s/^[[:space:]]*s\.version[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" Revnix.podspec)
+          if ! git ls-remote --exit-code --tags origin "refs/tags/v*" >/dev/null 2>&1; then
+            echo "No release tags yet; the first release bumps from $CURRENT."
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/v$CURRENT" >/dev/null 2>&1; then
+            echo "v$CURRENT is tagged; a normal release follows."
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::$CURRENT is on main but not tagged — releasing it instead of bumping."
+            scripts/release.sh --notes-for "$CURRENT" --notes-out "$RUNNER_TEMP/release-notes.md"
+            {
+              echo "pending=true"
+              echo "version=$CURRENT"
+              echo "sha=$(git rev-parse HEAD)"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Has the code moved since the last release?
+        if: steps.pending.outputs.pending != 'true'
+        id: changed
+        run: |
+          CURRENT=$(sed -n "s/^[[:space:]]*s\.version[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" Revnix.podspec)
+          if git rev-parse -q --verify "refs/tags/v$CURRENT" >/dev/null; then
+            if git diff --quiet "v$CURRENT" HEAD -- . ':(exclude)CHANGELOG.md'; then
+              CHANGED=false
+            else
+              CHANGED=true
+            fi
+            echo "Since v$CURRENT: changed=$CHANGED"
+          else
+            CHANGED=true
+            echo "No tag v$CURRENT to compare against; treating the tree as changed."
+          fi
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+
+      - name: Decide and apply the next version
+        if: steps.pending.outputs.pending != 'true'
+        id: version
+        run: |
+          scripts/release.sh \
+            --bump "${{ inputs.bump }}" \
+            --app-sha "${{ inputs.app_sha }}" \
+            --changed "${{ steps.changed.outputs.changed }}" \
+            --notes-out "$RUNNER_TEMP/release-notes.md"
+
+      - name: Refuse to reuse a version that already exists
+        if: steps.pending.outputs.pending != 'true'
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$NEXT" >/dev/null 2>&1; then
+            echo "::error::Tag v$NEXT already exists. Bump Revnix.podspec past it and re-run."
+            exit 1
+          fi
+
+      # release.sh moves the podspec and the source constant together; prove it
+      # before the bump goes anywhere near main.
+      - name: The podspec and the source constant agree
+        if: steps.pending.outputs.pending != 'true'
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          POD=$(sed -n "s/^[[:space:]]*s\.version[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" Revnix.podspec)
+          SRC=$(sed -n 's/.*static let sdkVersion = "\([^"]*\)".*/\1/p' Sources/Revnix/RevnixClient.swift)
+          if [ "$POD" != "$NEXT" ] || [ "$SRC" != "$NEXT" ]; then
+            echo "::error::expected $NEXT everywhere, got podspec=$POD source=$SRC."
+            exit 1
+          fi
+
+      - name: Test the bumped tree
+        if: steps.pending.outputs.pending != 'true'
+        run: swift test
+
+      - name: Land the bump through a pull request (main takes merge commits only)
+        if: steps.pending.outputs.pending != 'true'
+        id: land
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          SUMMARY: ${{ steps.version.outputs.summary }}
+        run: |
+          BRANCH="release/v$NEXT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "Release $NEXT" -m "$SUMMARY"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create --base main --head "$BRANCH" \
+            --title "Release $NEXT" --body-file "$RUNNER_TEMP/release-notes.md")
+          echo "Opened $PR_URL"
+          # Mergeability is computed asynchronously; give it a few tries.
+          MERGED=""
+          for i in 1 2 3 4 5 6; do
+            if gh pr merge "$PR_URL" --merge --delete-branch; then MERGED=1; break; fi
+            sleep 10
+          done
+          if [ -z "$MERGED" ]; then
+            echo "::error::Could not merge $PR_URL — nothing was released."
+            exit 1
+          fi
+          git fetch origin main
+          git checkout -q origin/main
+          LANDED=$(sed -n "s/^[[:space:]]*s\.version[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" Revnix.podspec)
+          if [ "$LANDED" != "$NEXT" ]; then
+            echo "::error::main carries $LANDED after the merge, expected $NEXT."
+            exit 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "pr=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve what to release
+        id: pub
+        env:
+          PENDING: ${{ steps.pending.outputs.pending }}
+        run: |
+          if [ "$PENDING" = "true" ]; then
+            echo "next=${{ steps.pending.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ steps.pending.outputs.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "next=${{ steps.version.outputs.next }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ steps.land.outputs.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # For Swift Package Manager this step is the publish.
+      - name: Tag and release
+        env:
+          NEXT: ${{ steps.pub.outputs.next }}
+          SHA: ${{ steps.pub.outputs.sha }}
+        run: |
+          # An annotated tag needs a committer identity. The "land" step sets
+          # one, but that step is skipped on the "main is already ahead of the
+          # tags" path — which is exactly the run that must not fail here.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$NEXT" -m "Revnix $NEXT" "$SHA"
+          git push origin "v$NEXT"
+          gh release create "v$NEXT" --target "$SHA" --title "Revnix $NEXT" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      # Second channel, and deliberately not load-bearing: the tag above has
+      # already shipped the release to every SPM consumer.
+      - name: Push the pod to CocoaPods trunk
+        id: pod
+        continue-on-error: true
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+          NEXT: ${{ steps.pub.outputs.next }}
+        run: |
+          if [ -z "$COCOAPODS_TRUNK_TOKEN" ]; then
+            echo "No COCOAPODS_TRUNK_TOKEN; skipping CocoaPods. v$NEXT is released for SPM."
+            exit 0
+          fi
+          gem install cocoapods --no-document
+          # trunk resolves s.source from the tag that was just pushed.
+          pod trunk push Revnix.podspec --allow-warnings
+
+      - name: Summary
+        if: always()
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+          NEXT: ${{ steps.pub.outputs.next }}
+          LEVEL: ${{ steps.version.outputs.level }}
+          LOCKSTEP: ${{ steps.version.outputs.lockstep }}
+          PR: ${{ steps.land.outputs.pr }}
+          PENDING: ${{ steps.pending.outputs.pending }}
+          APP_SHA: ${{ inputs.app_sha }}
+          POD: ${{ steps.pod.outcome }}
+        run: |
+          {
+            echo "## Revnix (Swift) ${NEXT:-?}"
+            echo ""
+            if [ "$PENDING" = "true" ]; then
+              echo "- released the version already on main (a previous run merged it but did not tag)"
+            else
+              echo "- from ${CURRENT:-?} (${LEVEL:-?} bump, lockstep=${LOCKSTEP:-?})"
+            fi
+            [ -n "$PR" ] && echo "- release PR: $PR"
+            [ -n "$APP_SHA" ] && echo "- revnix-app: $APP_SHA"
+            echo "- SPM: resolved from tag v${NEXT:-?}"
+            echo "- CocoaPods: ${POD:-skipped}"
+            echo "- status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

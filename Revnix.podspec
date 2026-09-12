@@ -10,10 +10,10 @@ Pod::Spec.new do |s|
     server-verifiable proof.
   DESC
 
-  s.homepage         = 'https://github.com/Oth-tech/revnix-swift'
+  s.homepage         = 'https://github.com/Oth-tech/RevnixSDK-iOS'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'Oth Tech' => 'support@revnix.com' }
-  s.source           = { :git => 'https://github.com/Oth-tech/revnix-swift.git', :tag => s.version.to_s }
+  s.source           = { :git => 'https://github.com/Oth-tech/RevnixSDK-iOS.git', :tag => s.version.to_s }
   s.documentation_url = 'https://revnix.io/docs/ios'
 
   s.swift_versions   = ['5.9']
