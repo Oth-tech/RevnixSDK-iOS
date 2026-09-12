@@ -434,13 +434,13 @@ public actor RevnixClient {
         return applyOfflinePolicy(entry, nowMs: nowMs, rolledBack: updateWallClock(nowMs: nowMs))
     }
 
-    /// Gate helper — never throws; unknown/unreachable = locked.
+    /// Gate helper: never throws. A transient failure answers from the offline cache; a deliberate rejection (401/403/404/409), an unknown id, or no cache answers false.
     public func isEntitled(_ entitlementId: String) async -> Bool {
         let snapshot: CustomerEntitlements?
         do {
             snapshot = try await entitlements()
         } catch {
-            snapshot = cachedEntitlements()
+            snapshot = nil
         }
         return snapshot?.entitlements.contains {
             $0.entitlementId == entitlementId && $0.isActive
