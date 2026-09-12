@@ -328,6 +328,28 @@ final class RevnixClientTests: XCTestCase {
         }
     }
 
+    func testIsEntitledAnswersFalseForARevokedKeyEvenWithAnActiveEntitlementCached() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.respond(
+            containing: "/entitlements", status: 401, body: #"{"error":"revoked"}"#)
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        let entitled = await client.isEntitled("pro")
+        XCTAssertFalse(entitled)
+    }
+
+    func testIsEntitledStillServesTheCacheOnATransientFailure() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.respond(
+            containing: "/entitlements", status: 500, body: #"{"error":"boom"}"#)
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        let entitled = await client.isEntitled("pro")
+        XCTAssertTrue(entitled)
+    }
+
     func testUnknownPlacement404IsNotPaperedOverByTheCache() async throws {
         StubProtocol.respondOnce(
             containing: "/placements", status: 200, body: Self.placementBody)
