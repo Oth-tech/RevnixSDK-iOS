@@ -21,13 +21,13 @@ Requires iOS 16+ / macOS 13+ / tvOS 16+ / watchOS 9+ and Swift 5.9.
 **Swift Package Manager**
 
 ```swift
-.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "0.2.0")
+.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "0.3.0")
 ```
 
 **CocoaPods**
 
 ```ruby
-pod 'Revnix', '~> 0.2'
+pod 'Revnix', '~> 0.3'
 ```
 
 ## Quick start
@@ -55,7 +55,7 @@ if let result = try await RevnixStoreKit.purchase(product, client: client) {
     _ = try await client.waitForEntitlements(seq: result.seq)
 }
 
-// Gate. Never throws; unknown/unreachable = locked.
+// Gate. Never throws; a transient failure answers from the cache; a deliberate rejection or no cache = locked.
 if await client.isEntitled("pro") { /* … */ }
 ```
 
@@ -150,12 +150,21 @@ An unrecognized future `template` renders the classic layout rather than
 nothing, and a struck-through anchor price is dropped whenever its currency
 symbol disagrees with the store's localized price.
 
+When `config.blocks` carries a design from the paywall builder, the view
+renders that design instead of the `template` layout, in the language `locale:`
+names (default: the device's). `onClose:` makes the paywall dismissible (the
+design's own close, or a drawn one when it has none) and, with `client:`,
+reports `paywall.closed`; your app performs the dismissal, and without it no
+close is drawn.
+
 ## API surface
 
 Beyond the calls shown above:
 
 | API | What it does |
 |---|---|
+| `client.entitlements() async throws -> CustomerEntitlements` | Network-first entitlement read under the resilience policy below; a snapshot served from the cache has `stale == true`. |
+| `client.registerPurchase(_:) async throws -> RegisterPurchaseResult` | Registers a `RegisterPurchaseInput` for a purchase your own StoreKit code made. Retryable failures are queued and rethrown. `RevnixStoreKit.purchase` returns `nil` instead of throwing when registration fails. |
 | `RevnixStoreKit.restore(client:) async -> Int` | Re-registers everything in `Transaction.currentEntitlements` (wire it to a "Restore purchases" button). The server dedupes on the shared purchase key, so it is always safe; returns the number registered. |
 | `client.customerId() -> String` | Current customer id; an `rvx_anon_…` id is minted (and persisted) on first call. |
 | `client.logout() -> String` | Mints a fresh anonymous customer locally and returns it. Call at sign-out, or the next user inherits the previous one's cached entitlements. |
@@ -167,6 +176,7 @@ Beyond the calls shown above:
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`). The one implicit moment the SDK cannot see itself; does nothing unless `deeplink_open` is configured. |
 | `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. |
+| `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
 ### Implicit placements
 
@@ -193,6 +203,7 @@ Everything but `apiKey` and `baseURL` has a default:
 | `entitlementsTTL` | `30` s | Soft TTL on entitlement reads: a snapshot this fresh answers without a network round trip. `0` restores always-fetch. |
 | `readYourWritesDelays` | `[0.25, 0.5, 1, 2]` | Post-purchase entitlement poll schedule in seconds, jittered ±20%; empty disables polling. |
 | `onDiagnostic` | n/a | Callback for swallowed background failures. |
+| `device` | `DeviceFacts.detect()` | Device facts sent in the `X-Revnix-Device` header on every placement resolve; `nil` sends nothing. |
 | `onImplicitPaywall` | `nil` | The on-switch for implicit placements; called on the main actor with `RevnixImplicitTrigger { placement, resolution }`. |
 | `implicitPlacements` | `nil` | Explicit override of "on when a handler is present". |
 | `lifecycle` | `.system` | Foreground/background source for `session_start` (`didBecomeActive` / `didEnterBackground`); `.disabled` keeps launch-time moments only. |
@@ -228,7 +239,7 @@ the ledger never catches up.
 swift test
 ```
 
-32 unit tests cover the full resilience matrix against a `URLProtocol` stub.
+The unit tests in `RevnixClientTests` cover the full resilience matrix against a `URLProtocol` stub.
 
 The four store-glue tests in `StoreKitIntegrationTests` drive a real StoreKit 2
 purchase through `SKTestSession` against `Tests/RevnixTests/Resources/Revnix.storekit`.
@@ -247,6 +258,6 @@ the full purchase → register → unlock path.
 **Not yet published.** The Swift Package Manager and CocoaPods coordinates
 above are the intended ones, but neither the repository nor the pod is public
 yet, so `swift package resolve` / `pod install` will not find them. Until they
-ship, apps integrate over the [REST API](https://revnix.io/docs/ios), the
+ship, apps integrate over the [REST API](https://revnix.io/docs/rest-api), the
 same `/v1` contract this SDK speaks, so migrating later does not change the
 backend integration.
