@@ -336,6 +336,9 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
     public let paywallJSON: JSONValue?
     /// `experiment` as the server sent it; same purpose as `paywallJSON`.
     public let experimentJSON: JSONValue?
+    /// Set only on a dashboard QR/link preview resolution
+    /// (`GET /v1/paywalls/preview/{token}`), never on a real resolve.
+    public let preview: Bool?
 
     public init(
         status: String,
@@ -345,7 +348,8 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
         paywall: PlacementPaywall? = nil,
         experiment: PlacementExperiment? = nil,
         paywallJSON: JSONValue? = nil,
-        experimentJSON: JSONValue? = nil
+        experimentJSON: JSONValue? = nil,
+        preview: Bool? = nil
     ) {
         self.status = status
         self.placementKey = placementKey
@@ -355,10 +359,11 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
         self.experiment = experiment
         self.paywallJSON = paywallJSON
         self.experimentJSON = experimentJSON
+        self.preview = preview
     }
 
     private enum CodingKeys: String, CodingKey {
-        case status, placementKey, revision, offering, paywall, experiment
+        case status, placementKey, revision, offering, paywall, experiment, preview
     }
 
     public init(from decoder: Decoder) throws {
@@ -367,6 +372,7 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
         placementKey = try c.decode(String.self, forKey: .placementKey)
         revision = try c.decode(Int.self, forKey: .revision)
         offering = try c.decode(PlacementOffering.self, forKey: .offering)
+        preview = try c.decodeIfPresent(Bool.self, forKey: .preview)
         // Same key read twice: once loose, once typed. `decodeIfPresent`
         // already folds a JSON null into nil, so `.null` never lands here.
         // The typed reads are `try?` for the same reason `PaywallConfig`
@@ -398,5 +404,6 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
         } else {
             try c.encodeIfPresent(experiment, forKey: .experiment)
         }
+        try c.encodeIfPresent(preview, forKey: .preview)
     }
 }

@@ -174,7 +174,7 @@ Beyond the calls shown above:
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions — `.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error` — i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
-| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`). The one implicit moment the SDK cannot see itself; does nothing unless `deeplink_open` is configured. |
+| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`). The one implicit moment the SDK cannot see itself; an ordinary link does nothing unless `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
@@ -190,6 +190,15 @@ pass `placementKey: trigger.resolution.placementKey` to `RevnixPaywallView`
 — that marks the display as implicit and is what stops a `paywall_decline`
 paywall from firing `paywall_decline` again. A close is a decline: never
 report one for a display that ended in a purchase.
+
+The dashboard's QR/link paywall preview rides the same `handleDeepLink` call:
+a scanned or tapped preview link (`<scheme>://revnix-preview?revnix_preview=…`)
+is fetched and handed to `onImplicitPaywall` regardless of dashboard
+configuration. Detect it from the trigger's resolution —
+`resolution.placementKey == revnixPreviewPlacementKey` or
+`resolution.preview == true` — before presenting; `RevnixPaywallView` already
+disables purchases and analytics on it (a host rendering its own UI must
+check itself).
 
 ### `RevnixConfig` knobs
 
