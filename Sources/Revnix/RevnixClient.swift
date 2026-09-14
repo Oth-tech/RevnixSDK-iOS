@@ -165,17 +165,69 @@ public actor RevnixClient {
     ///
     /// This is the one implicit moment the SDK cannot see for itself — the URL
     /// goes to your entry point, and an SDK intercepting it would be fighting
-    /// your router. Does nothing unless `deeplink_open` is configured in the
-    /// dashboard. Delivered on the first frame, while the cold-start batch is
-    /// still deciding what to show, it waits for the batch and presents only
-    /// if the batch showed nothing — the moment is reported either way.
+    /// your router. An ordinary link does nothing unless `deeplink_open` is
+    /// configured in the dashboard; a dashboard QR/link preview
+    /// (`<scheme>://revnix-preview?revnix_preview=<token>`) is always handed
+    /// to `onImplicitPaywall`, regardless of dashboard configuration.
+    /// Delivered on the first frame, while the cold-start batch is still
+    /// deciding what to show, both wait for the batch — an ordinary link
+    /// presents only if the batch showed nothing (the moment is reported
+    /// either way), a preview presents after it.
     public func handleDeepLink(_ url: URL) async {
+        let raw = url.absoluteString
+        if let token = Self.previewToken(in: raw) {
+            await presentPreview(token)
+            return
+        }
         let extra: [String: JSONValue] = [
-            "url": .string(String(url.absoluteString.prefix(1024))),
+            "url": .string(String(raw.prefix(1024))),
         ]
         var present = true
         if let batch = launchBatch { present = !(await batch.value) }
         _ = await fireImplicit(.deeplinkOpen, extra: extra, present: present)
+    }
+
+    private static let previewTokenPattern = try! NSRegularExpression(
+        pattern: "[?&]revnix_preview=([0-9a-f]{64})(?:[&#]|$)")
+
+    private static func previewToken(in urlString: String) -> String? {
+        let range = NSRange(urlString.startIndex..., in: urlString)
+        guard let match = previewTokenPattern.firstMatch(in: urlString, range: range),
+            let tokenRange = Range(match.range(at: 1), in: urlString)
+        else { return nil }
+        return String(urlString[tokenRange])
+    }
+
+    private func presentPreview(_ token: String) async {
+        if let batch = launchBatch { _ = await batch.value }
+        guard !implicitStopped else { return }
+        guard let handler = config.onImplicitPaywall else {
+            diagnostic(op: "preview", message: "no onImplicitPaywall handler configured")
+            return
+        }
+        do {
+            let data = try await request(
+                path: "/v1/paywalls/preview/\(encode(token))", method: "GET")
+            guard !implicitStopped else { return }
+            let resolution = try decodePreviewResolution(from: data)
+            let trigger = RevnixImplicitTrigger(placement: .deeplinkOpen, resolution: resolution)
+            await MainActor.run { handler(trigger) }
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "preview", message: "\(error)")
+        }
+    }
+
+    private func decodePreviewResolution(from data: Data) throws -> PlacementResolution {
+        guard var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw RevnixError.badResponse }
+        if obj["status"] == nil { obj["status"] = "ok" }
+        if obj["revision"] == nil || obj["revision"] is NSNull { obj["revision"] = 0 }
+        if obj["offering"] == nil || obj["offering"] is NSNull {
+            obj["offering"] = ["offeringId": "", "displayName": "", "packages": []]
+        }
+        let filled = try JSONSerialization.data(withJSONObject: obj)
+        return try decode(PlacementResolution.self, from: filled)
     }
 
     private func appStateChanged(_ state: RevnixAppState) async {
@@ -703,6 +755,7 @@ public actor RevnixClient {
         {
             implicitViewIds.insert(viewId)
         }
+        guard placementKey != revnixPreviewPlacementKey else { return viewId }
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
             "viewId": .string(viewId),
@@ -731,6 +784,7 @@ public actor RevnixClient {
     /// `RevnixPaywallView` only reports its close affordances, never a
     /// purchase-driven dismissal.
     public func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {
+        guard placementKey != revnixPreviewPlacementKey else { return }
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
             "viewId": .string(viewId),
@@ -781,6 +835,7 @@ public actor RevnixClient {
         message: String? = nil,
         eventId: String? = nil
     ) async {
+        guard placementKey != revnixPreviewPlacementKey else { return }
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
             "viewId": .string(viewId),

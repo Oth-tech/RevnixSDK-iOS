@@ -824,6 +824,11 @@ final class Recorder: @unchecked Sendable {
         defer { lock.unlock() }
         return ops.count
     }
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return ops
+    }
 }
 
 /// URLProtocol stub: path-substring → canned response, connection error, or a

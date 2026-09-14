@@ -244,6 +244,7 @@ public struct RevnixPaywallView: View {
     /// REV-263: rises per CTA press, so a retry is its own occurrence.
     @State private var purchaseAttempts = 0
     @State private var didReportNoProducts = false
+    @State private var showPreviewAlert = false
     @Environment(\.openURL) private var openURL
 
     /// - Parameters:
@@ -389,6 +390,10 @@ public struct RevnixPaywallView: View {
     /// Every CTA path goes through here, so the start report can never be
     /// wired on one render path and forgotten on the other.
     private func purchase(_ packageId: String) {
+        guard placementKey != revnixPreviewPlacementKey else {
+            showPreviewAlert = true
+            return
+        }
         reportPurchaseStart(packageId)
         onPurchase(packageId)
     }
@@ -429,13 +434,20 @@ public struct RevnixPaywallView: View {
         // classic layouts below, which stay the fallback for every paywall
         // published before the block builder — so anything already live
         // renders unchanged.
-        if let blockDoc = config.blocks {
-            // REV-271: the language overlay is applied ONCE, here, so every
-            // view below reads plain strings and none of them can forget to
-            // localize one. A paywall with no translations returns itself.
-            blockScreen(blockDoc.localized(locale ?? revnixDeviceLocale()))
-        } else {
-            classicBody
+        Group {
+            if let blockDoc = config.blocks {
+                // REV-271: the language overlay is applied ONCE, here, so every
+                // view below reads plain strings and none of them can forget to
+                // localize one. A paywall with no translations returns itself.
+                blockScreen(blockDoc.localized(locale ?? revnixDeviceLocale()))
+            } else {
+                classicBody
+            }
+        }
+        .alert("Preview", isPresented: $showPreviewAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Purchases are disabled in preview.")
         }
     }
 

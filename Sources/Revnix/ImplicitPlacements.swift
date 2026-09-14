@@ -26,6 +26,14 @@ public enum RevnixImplicitPlacement: String, Sendable, CaseIterable {
     case transactionAbandon = "transaction_abandon"
 }
 
+/// The placementKey a dashboard QR/link preview resolution carries
+/// (`<scheme>://revnix-preview?revnix_preview=<token>`, handed to
+/// `handleDeepLink`). Not one of the six above and never sent to
+/// `/v1/placements/triggered` — detect a preview via
+/// `resolution.placementKey == revnixPreviewPlacementKey` (or
+/// `resolution.preview == true`).
+public let revnixPreviewPlacementKey = "revnix_preview"
+
 /// What the host is handed when a moment resolved to a paywall. Only ever
 /// delivered WITH a paywall — a moment the server answered with none (nothing
 /// attached, or the same paywall the customer is leaving) is reported and
