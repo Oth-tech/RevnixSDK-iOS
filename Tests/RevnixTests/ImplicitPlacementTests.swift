@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 @testable import Revnix
@@ -9,6 +10,11 @@ import XCTest
 /// was configured. That makes the key spellings the one thing here worth
 /// asserting hard, alongside the loop guard's shape.
 final class ImplicitPlacementTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        StubProtocol.reset()
+    }
 
     func testSixKeysMatchTheServerContract() {
         XCTAssertEqual(
@@ -83,5 +89,109 @@ final class ImplicitPlacementTests: XCTestCase {
         XCTAssertEqual(seen, [.background, .foreground])
         cancel()
         XCTAssertNil(handler)
+    }
+
+    func testNoHandlerStillReportsTheDeepLinkWithResolveFalseAndAsksNoConfig() async throws {
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "deeplink_open"))
+        let client = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: MemoryStorage(),
+                session: URLSession(configuration: {
+                    let config = URLSessionConfiguration.ephemeral
+                    config.protocolClasses = [StubProtocol.self]
+                    return config
+                }()),
+                device: nil,
+                lifecycle: .disabled))
+
+        await client.handleDeepLink(URL(string: "https://example.com/promo?utm_source=ig")!)
+
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/placements/triggered"), 1)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/config"), 0)
+        XCTAssertEqual(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/placements/triggered"))
+                .contains(#""resolve":false"#), true)
+    }
+
+    func testImplicitPlacementsOffNeverPresentsADeepLinkPaywallEvenWithAHandler() async throws {
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "deeplink_open"))
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [StubProtocol.self]
+        let recorder = Recorder()
+        let client = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: MemoryStorage(),
+                session: URLSession(configuration: sessionConfig),
+                device: nil,
+                onImplicitPaywall: { trigger in recorder.record(trigger.resolution.placementKey) },
+                implicitPlacements: false,
+                lifecycle: .disabled))
+
+        await client.handleDeepLink(URL(string: "https://example.com/promo?utm_source=ig")!)
+
+        XCTAssertEqual(recorder.values, [])
+        XCTAssertEqual(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/placements/triggered"))
+                .contains(#""resolve":false"#), true)
+    }
+
+    func testDeeplinkOpenNotConfiguredStillReportsButNeverResolvesForThatPlacement() async throws {
+        StubProtocol.respond(
+            containing: "/v1/config", status: 200, body: #"{"implicitPlacements":["paywall_decline"]}"#)
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "deeplink_open"))
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [StubProtocol.self]
+        let recorder = Recorder()
+        let client = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: MemoryStorage(),
+                session: URLSession(configuration: sessionConfig),
+                device: nil,
+                onImplicitPaywall: { trigger in recorder.record(trigger.resolution.placementKey) },
+                lifecycle: .disabled))
+
+        await client.handleDeepLink(URL(string: "https://example.com/promo?utm_source=ig")!)
+
+        XCTAssertEqual(recorder.values, [])
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/placements/triggered"), 1)
+        XCTAssertEqual(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/placements/triggered"))
+                .contains(#""resolve":false"#), true)
+    }
+
+    func testStopThenStartClearsTheStoppedFlagSoADeepLinkIsReportedAgain() async throws {
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "deeplink_open"))
+        let client = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: MemoryStorage(),
+                session: URLSession(configuration: {
+                    let config = URLSessionConfiguration.ephemeral
+                    config.protocolClasses = [StubProtocol.self]
+                    return config
+                }()),
+                device: nil,
+                lifecycle: .disabled))
+
+        await client.stop()
+        await client.start()
+        await client.handleDeepLink(URL(string: "https://example.com/promo?utm_source=ig")!)
+
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/placements/triggered"), 1)
     }
 }

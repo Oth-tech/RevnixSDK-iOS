@@ -16,6 +16,16 @@
   what SPM resolves — and from CocoaPods as the `Revnix` pod. Nothing about
   the API changed to make this possible; the code was simply never tagged.
 
+### Changed
+
+- **Deep links always record their attribution.** `handleDeepLink(_:)`
+  reports every ordinary link, so its `link.*` attributes land on the
+  customer with no `onImplicitPaywall` handler and no `deeplink_open`
+  placement. A paywall still presents only when implicit placements are on
+  and `deeplink_open` is configured; otherwise the report carries
+  `resolve: false` and the server stores the link facts only. `start()`
+  after `stop()` now resumes deep-link reporting even without a handler.
+
 ## 0.3.0
 
 Never released. The version the podspec and `RevnixClient.sdkVersion` carried

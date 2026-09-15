@@ -174,8 +174,8 @@ Beyond the calls shown above:
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions — `.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error` — i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
-| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link does nothing unless `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
-| `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. |
+| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
+| `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
 ### Implicit placements
@@ -183,8 +183,11 @@ Beyond the calls shown above:
 Six placements resolve without a `resolvePlacement` call: `app_install`,
 `app_launch`, `session_start`, `deeplink_open`, `paywall_decline` and
 `transaction_abandon`. Passing `onImplicitPaywall` to `RevnixConfig` turns
-them on (off by default — no handler, no extra requests); the SDK then asks
-`GET /v1/config` once and fires only for the moments the dashboard configured.
+them on (off by default — no handler, no extra requests for the other five
+moments, though `handleDeepLink` always reports the link it is handed); the
+SDK then asks `GET /v1/config` once and fires only for the moments the
+dashboard configured. `implicitPlacements = false` is an explicit off switch
+for paywalls, but it does not stop `handleDeepLink`'s report.
 The handler runs on the main actor, so present directly. When you present,
 pass `placementKey: trigger.resolution.placementKey` to `RevnixPaywallView`
 — that marks the display as implicit and is what stops a `paywall_decline`
@@ -247,7 +250,7 @@ Everything but `apiKey` and `baseURL` has a default:
 | `onDiagnostic` | n/a | Callback for swallowed background failures. |
 | `device` | `DeviceFacts.detect()` | Device facts sent in the `X-Revnix-Device` header on every placement resolve; `nil` sends nothing. |
 | `onImplicitPaywall` | `nil` | The on-switch for implicit placements; called on the main actor with `RevnixImplicitTrigger { placement, resolution }`. |
-| `implicitPlacements` | `nil` | Explicit override of "on when a handler is present". |
+| `implicitPlacements` | `nil` | Explicit override of "on when a handler is present". `false` stops implicit paywalls, not `handleDeepLink`'s report. |
 | `lifecycle` | `.system` | Foreground/background source for `session_start` (`didBecomeActive` / `didEnterBackground`); `.disabled` keeps launch-time moments only. |
 | `sessionTimeout` | `30 * 60` s | How long the app must be backgrounded for the return to count as a session. |
 | `now` / `session` | n/a | Injectable clock and `URLSession` for tests. |
