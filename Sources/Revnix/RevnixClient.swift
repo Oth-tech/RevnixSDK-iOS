@@ -113,9 +113,9 @@ public actor RevnixClient {
     /// launch whether or not a paywall showed — but an app that configured
     /// all three must not have three paywalls pushed onto its first frame.
     public func start() async {
+        implicitStopped = false
         guard implicitEnabled, !implicitStarted else { return }
         implicitStarted = true
-        implicitStopped = false
 
         // Subscribed BEFORE the batch, which can take a full network timeout
         // when offline: a customer who backgrounds the app during that window
@@ -165,8 +165,10 @@ public actor RevnixClient {
     ///
     /// This is the one implicit moment the SDK cannot see for itself — the URL
     /// goes to your entry point, and an SDK intercepting it would be fighting
-    /// your router. An ordinary link does nothing unless `deeplink_open` is
-    /// configured in the dashboard; a dashboard QR/link preview
+    /// your router. An ordinary link is always reported so its `link.*`
+    /// attribution facts land on the customer; a paywall presents only when
+    /// implicit placements are on AND `deeplink_open` is configured in the
+    /// dashboard. A dashboard QR/link preview
     /// (`<scheme>://revnix-preview?revnix_preview=<token>`) is always handed
     /// to `onImplicitPaywall`, regardless of dashboard configuration.
     /// Delivered on the first frame, while the cold-start batch is still
@@ -283,9 +285,6 @@ public actor RevnixClient {
         }
     }
 
-    /// How long after a FAILED config read the next moment is answered "none"
-    /// without a request. An offline burst of paywall interactions then costs
-    /// one probe, while a deep link opened later on good network still works.
     private static let implicitConfigRetryHold: TimeInterval = 60
 
     /// Report one implicit moment and present whatever it resolves to. Returns
@@ -300,13 +299,10 @@ public actor RevnixClient {
         extra: [String: JSONValue] = [:],
         present: Bool = true
     ) async -> Bool {
-        guard implicitEnabled, !implicitStopped else { return false }
-        let configured = await implicitConfig()
-        // The common case for five of the six in most apps: nothing attached,
-        // so nothing is sent and no ledger row is written.
-        guard configured.contains(placement.rawValue), !implicitStopped else {
-            return false
-        }
+        guard !implicitStopped else { return false }
+        let resolve =
+            implicitEnabled ? await implicitConfig().contains(placement.rawValue) : false
+        guard resolve || placement == .deeplinkOpen, !implicitStopped else { return false }
 
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
@@ -318,6 +314,7 @@ public actor RevnixClient {
             "occurredAt": .number(Double(nowMs())),
             "sdkVersion": .string(Self.sdkVersion),
         ]
+        if !resolve { body["resolve"] = .bool(false) }
         for (k, v) in extra { body[k] = v }
         do {
             let data = try await request(
@@ -328,7 +325,7 @@ public actor RevnixClient {
             // `paywall: null` and no `status`/`revision` at all — a normal
             // state, not a decode failure to count against the server.
             let response = try decode(ImplicitTriggerResponse.self, from: data)
-            guard !implicitStopped, present,
+            guard !implicitStopped, present, resolve,
                 let resolution = response.resolution, resolution.paywall != nil
             else { return false }
             let trigger = RevnixImplicitTrigger(placement: placement, resolution: resolution)

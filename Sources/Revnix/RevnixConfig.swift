@@ -46,8 +46,10 @@ public struct RevnixConfig: Sendable {
     /// paywall pushed over a launch screen is worse than no paywall.
     ///
     /// Providing this handler is what TURNS IMPLICIT PLACEMENTS ON. Without
-    /// it the SDK makes no extra requests at all. With it, the SDK asks
-    /// `GET /v1/config` once and then fires only for the moments this app has
+    /// it the SDK makes no extra requests, except `handleDeepLink`, which
+    /// always reports the link it is handed so its `link.*` attribution
+    /// facts land on the customer. With the handler set, the SDK also asks
+    /// `GET /v1/config` once and fires for the other moments this app has
     /// actually configured in the dashboard.
     ///
     /// ⚠️ Pass `trigger.resolution.placementKey` to `logPaywallDisplay` for the
@@ -59,7 +61,11 @@ public struct RevnixConfig: Sendable {
     /// cannot see a rule pointing at a DIFFERENT paywall that points back.
     public var onImplicitPaywall: (@Sendable (RevnixImplicitTrigger) -> Void)?
     /// REV-272: explicit off switch, even when `onImplicitPaywall` is set.
-    /// `nil` means "on when a handler is present".
+    /// `nil` means "on when a handler is present". Set `false` and
+    /// `handleDeepLink` still reports the link it is handed, for its
+    /// `link.*` attribution facts only — it never presents a deep-link
+    /// paywall. A dashboard preview link (`?revnix_preview=<token>`) is the
+    /// exception and still presents.
     public var implicitPlacements: Bool?
     /// REV-272: the rule the client reads — `implicitPlacements` when set,
     /// else whether a handler is present.
