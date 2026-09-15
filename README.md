@@ -174,7 +174,7 @@ Beyond the calls shown above:
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions — `.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error` — i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
-| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`). The one implicit moment the SDK cannot see itself; an ordinary link does nothing unless `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
+| `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link does nothing unless `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
@@ -199,6 +199,39 @@ configuration. Detect it from the trigger's resolution —
 `resolution.preview == true` — before presenting; `RevnixPaywallView` already
 disables purchases and analytics on it (a host rendering its own UI must
 check itself).
+
+### Deep links
+
+SwiftUI — `.onOpenURL` already covers cold start, nothing else to wire:
+
+```swift
+.onOpenURL { url in Task { await client.handleDeepLink(url) } }
+```
+
+UIKit with a `SceneDelegate` — the launch URL arrives in `willConnectTo`,
+not in the warm callbacks:
+
+```swift
+func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+           options connectionOptions: UIScene.ConnectionOptions) {
+    if let url = connectionOptions.urlContexts.first?.url
+        ?? connectionOptions.userActivities.first?.webpageURL {
+        Task { await client.handleDeepLink(url) }
+    }
+}
+
+func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    if let url = URLContexts.first?.url { Task { await client.handleDeepLink(url) } }
+}
+
+func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+    if let url = userActivity.webpageURL { Task { await client.handleDeepLink(url) } }
+}
+```
+
+`urlContexts` is a custom scheme, `userActivities` a universal link (both
+cold start); `openURLContexts` / `continue` are the same two while running.
+Each callback sees a given open once, so no double-report guard is needed.
 
 ### `RevnixConfig` knobs
 
