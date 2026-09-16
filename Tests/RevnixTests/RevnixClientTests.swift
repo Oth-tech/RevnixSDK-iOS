@@ -44,7 +44,8 @@ final class RevnixClientTests: XCTestCase {
         entitlementsTTL: TimeInterval = 30,
         readYourWritesDelays: [TimeInterval] = [0.25, 0.5, 1, 2],
         onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
-        device: DeviceFacts? = RevnixClientTests.fixedDevice
+        device: DeviceFacts? = RevnixClientTests.fixedDevice,
+        onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil
     ) -> RevnixClient {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [StubProtocol.self]
@@ -59,7 +60,8 @@ final class RevnixClientTests: XCTestCase {
                 onDiagnostic: onDiagnostic,
                 now: now,
                 session: URLSession(configuration: sessionConfig),
-                device: device
+                device: device,
+                onDeferredDeepLink: onDeferredDeepLink
             ))
     }
 
@@ -788,6 +790,84 @@ final class RevnixClientTests: XCTestCase {
                 return XCTFail("expected .network, got \(err)")
             }
         }
+    }
+
+    func testDeferredDeepLinkFiresOnceWithURLAndMatch() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200,
+            body: #"{"deferredDeepLink":{"url":"https://example.com/offer","match":"probabilistic"}}"#)
+        let events = Recorder()
+        let client = makeClient(
+            onDeferredDeepLink: { url, match in
+                events.record("\(url.absoluteString)|\(match.rawValue)")
+            })
+        await client.registerInstall()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.values.first, "https://example.com/offer|probabilistic")
+    }
+
+    func testSecondInstallReportAfterLogoutDoesNotRefireTheCallback() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200,
+            body: #"{"deferredDeepLink":{"url":"https://example.com/offer","match":"exact"}}"#)
+        let storage = MemoryStorage()
+        let events = Recorder()
+        let client = makeClient(
+            storage: storage, onDeferredDeepLink: { _, _ in events.record("fired") })
+        await client.registerInstall()
+        _ = await client.logout()
+        await client.registerInstall()
+        XCTAssertEqual(events.count, 1)
+    }
+
+    func testHandlerNotCalledWhenLinkArrivesOnlyOnASecondReportAfterLogout() async throws {
+        StubProtocol.respondOnce(containing: "/installs", status: 200, body: "{}")
+        StubProtocol.respond(
+            containing: "/installs", status: 200,
+            body: #"{"deferredDeepLink":{"url":"https://example.com/offer","match":"probabilistic"}}"#)
+        let events = Recorder()
+        let client = makeClient(onDeferredDeepLink: { _, _ in events.record("fired") })
+        await client.registerInstall()
+        _ = await client.logout()
+        await client.registerInstall()
+        XCTAssertEqual(events.count, 0)
+    }
+
+    func testRegisterInstallDefaultsPlatformWhenNotPassed() async throws {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        let client = makeClient()
+        await client.registerInstall()
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertTrue(body.contains(#""platform":"\#(DeviceFacts.platformName)""#), body)
+    }
+
+    func testNoDeferredDeepLinkOnTheWireNeverCallsTheHandler() async throws {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        let events = Recorder()
+        let client = makeClient(onDeferredDeepLink: { _, _ in events.record("fired") })
+        await client.registerInstall()
+        XCTAssertEqual(events.count, 0)
+    }
+
+    func testNoHandlerConfiguredNeverCrashes() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200,
+            body: #"{"deferredDeepLink":{"url":"https://example.com/offer","match":"probabilistic"}}"#)
+        let client = makeClient()
+        await client.registerInstall()
+    }
+
+    func testMalformedDeferredDeepLinkIsIgnoredWithoutFailingTheInstallReport() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200,
+            body: #"{"deferredDeepLink":{"url":"https://example.com/offer","match":"fuzzy"}}"#)
+        let storage = MemoryStorage()
+        let events = Recorder()
+        let client = makeClient(storage: storage, onDeferredDeepLink: { _, _ in events.record("fired") })
+        await client.registerInstall()
+        XCTAssertEqual(events.count, 0)
+        let cid = storage.get("revnix.customerId") ?? ""
+        XCTAssertNotNil(storage.get("revnix.installReported.\(cid)"))
     }
 }
 

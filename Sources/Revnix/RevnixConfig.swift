@@ -5,6 +5,14 @@ public struct RevnixDiagnostic: Sendable {
     public let message: String
 }
 
+/// REV-299: how confidently `/v1/installs` matched the deferred link to this
+/// install. iOS never reports `exact` — there is no install-time signal that
+/// certain, only fingerprint matching against a click seen shortly before.
+public enum DeferredDeepLinkMatch: String, Sendable, Decodable {
+    case exact
+    case probabilistic
+}
+
 public struct RevnixConfig: Sendable {
     /// Publishable key (`rvx_pk_live_…` / `rvx_pk_test_…`). The key fixes
     /// app + environment server-side. Secret keys never ship in a binary —
@@ -67,6 +75,12 @@ public struct RevnixConfig: Sendable {
     /// paywall. A dashboard preview link (`?revnix_preview=<token>`) is the
     /// exception and still presents.
     public var implicitPlacements: Bool?
+    /// REV-299: called with the link the user clicked before installing,
+    /// echoed back by `/v1/installs` at most once per install — never fires
+    /// again on later launches, even for later install reports. Route it
+    /// yourself (and, if it should also gate an implicit `deeplink_open`
+    /// paywall rule, hand the URL to `handleDeepLink`).
+    public var onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)?
     /// REV-272: the rule the client reads — `implicitPlacements` when set,
     /// else whether a handler is present.
     public var implicitPlacementsEnabled: Bool {
@@ -94,6 +108,7 @@ public struct RevnixConfig: Sendable {
         device: DeviceFacts? = DeviceFacts.detect(),
         onImplicitPaywall: (@Sendable (RevnixImplicitTrigger) -> Void)? = nil,
         implicitPlacements: Bool? = nil,
+        onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil,
         lifecycle: RevnixAppLifecycle = .system,
         sessionTimeout: TimeInterval = revnixDefaultSessionTimeout
     ) {
@@ -110,6 +125,7 @@ public struct RevnixConfig: Sendable {
         self.device = device
         self.onImplicitPaywall = onImplicitPaywall
         self.implicitPlacements = implicitPlacements
+        self.onDeferredDeepLink = onDeferredDeepLink
         self.lifecycle = lifecycle
         self.sessionTimeout = sessionTimeout
     }
