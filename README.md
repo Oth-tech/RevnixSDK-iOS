@@ -236,6 +236,28 @@ func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
 cold start); `openURLContexts` / `continue` are the same two while running.
 Each callback sees a given open once, so no double-report guard is needed.
 
+### Deferred deep links
+
+A click on a Revnix link sends iOS to the App Store, remembering the click
+for up to an hour. `registerInstall(platform:appVersion:)` — leave `platform`
+`nil` and it reports the platform for you — can come back with the link that install
+matched: probabilistic, from a same-network click within that hour, so it can
+be wrong on a shared network. Only a link whose scheme matches the app's
+configured URL scheme is ever returned. Pass `onDeferredDeepLink` to get it,
+delivered at most once per install, on the main actor:
+
+```swift
+let client = RevnixClient(RevnixConfig(
+    apiKey: "rvx_pk_live_…",
+    baseURL: URL(string: "https://your-deployment.convex.site")!,
+    onDeferredDeepLink: { url, match in router.open(url) }
+))
+await client.registerInstall()
+```
+
+Route the URL yourself; optionally also pass it to `handleDeepLink` for
+`deeplink_open` paywall rules.
+
 ### `RevnixConfig` knobs
 
 Everything but `apiKey` and `baseURL` has a default:

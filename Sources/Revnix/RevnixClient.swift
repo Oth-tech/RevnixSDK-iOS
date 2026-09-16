@@ -709,14 +709,35 @@ public actor RevnixClient {
             "customerId": .string(cid),
             "sdkVersion": .string(Self.sdkVersion),
         ]
-        if let v = platform { body["platform"] = .string(v) }
+        body["platform"] = .string(platform ?? DeviceFacts.platformName)
         if let v = appVersion { body["appVersion"] = .string(v) }
         do {
-            _ = try await request(path: "/v1/installs", method: "POST", body: body)
+            let data = try await request(
+                path: "/v1/installs", method: "POST", body: body, headers: await deviceHeaders())
             config.storage.set(Keys.installReported(cid), "1")
+            await deliverDeferredDeepLink(from: data)
         } catch {
             bgFailures += 1
             diagnostic(op: "registerInstall", message: "\(error)")
+        }
+    }
+
+    private func deliverDeferredDeepLink(from data: Data) async {
+        guard config.storage.get(Keys.deferredDeepLinkDelivered) == nil else { return }
+        config.storage.set(Keys.deferredDeepLinkDelivered, "1")
+        guard let handler = config.onDeferredDeepLink,
+            let response = try? JSONDecoder().decode(InstallResponse.self, from: data),
+            let link = response.deferredDeepLink
+        else { return }
+        await MainActor.run { handler(link.url, link.match) }
+    }
+
+    private struct InstallResponse: Decodable {
+        let deferredDeepLink: DeferredDeepLink?
+
+        struct DeferredDeepLink: Decodable {
+            let url: URL
+            let match: DeferredDeepLinkMatch
         }
     }
 
@@ -982,6 +1003,7 @@ public actor RevnixClient {
         static func installReported(_ cid: String) -> String {
             "revnix.installReported.\(cid)"
         }
+        static let deferredDeepLinkDelivered = "revnix.deferredDeepLinkDelivered"
     }
 
     private func nowMs() -> Int { Int(config.now().timeIntervalSince1970 * 1000) }

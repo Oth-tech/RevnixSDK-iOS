@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`onDeferredDeepLink`.** `RevnixConfig(onDeferredDeepLink:)` delivers the
+  link a customer clicked before installing — probabilistic match from a
+  same-network click within the last hour — at most once per install, on the
+  main actor, from `registerInstall(platform:appVersion:)`'s response.
+  `registerInstall` now reports the platform for you when none is passed. (REV-299)
 - **Dashboard QR/link paywall preview.** A preview link
   (`<scheme>://revnix-preview?revnix_preview=<token>`) handed to
   `handleDeepLink(_:)` fetches the draft paywall and hands it to
