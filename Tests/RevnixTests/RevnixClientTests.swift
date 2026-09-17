@@ -849,6 +849,43 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertEqual(events.count, 0)
     }
 
+    func testResolveDeepLinkUnwrapsAClickTrackingURL() async throws {
+        StubProtocol.respond(
+            containing: "/links/resolve", status: 200,
+            body: #"{"url":"com.voigu.app://promo?utm_source=x","hops":2}"#)
+        let client = makeClient()
+        let resolved = await client.resolveDeepLink(
+            URL(string: "https://click.mailchimp.com/track/abc")!)
+        XCTAssertEqual(resolved.absoluteString, "com.voigu.app://promo?utm_source=x")
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/links/resolve"))
+        XCTAssertEqual(
+            path, "/v1/links/resolve?url=https%3A%2F%2Fclick.mailchimp.com%2Ftrack%2Fabc")
+    }
+
+    func testResolveDeepLinkFallsBackToInputOnTransportFailure() async throws {
+        StubProtocol.failWithConnectionError(containing: "/links/resolve")
+        let client = makeClient()
+        let input = URL(string: "https://click.mailchimp.com/track/abc")!
+        let resolved = await client.resolveDeepLink(input)
+        XCTAssertEqual(resolved, input)
+    }
+
+    func testResolveDeepLinkSkipsTheRequestForANonHTTPScheme() async throws {
+        let client = makeClient()
+        let input = URL(string: "com.voigu.app://promo")!
+        let resolved = await client.resolveDeepLink(input)
+        XCTAssertEqual(resolved, input)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/links/resolve"), 0)
+    }
+
+    func testResolveDeepLinkSkipsTheRequestForAnOversizedURL() async throws {
+        let client = makeClient()
+        let input = URL(string: "https://example.com/" + String(repeating: "a", count: 1025))!
+        let resolved = await client.resolveDeepLink(input)
+        XCTAssertEqual(resolved, input)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/links/resolve"), 0)
+    }
+
     func testNoHandlerConfiguredNeverCrashes() async throws {
         StubProtocol.respond(
             containing: "/installs", status: 200,
@@ -1060,11 +1097,14 @@ final class StubProtocol: URLProtocol {
 
     override func startLoading() {
         let path = request.url?.path ?? ""
-        // Recorded WITH the query string so tests can assert query items;
-        // stub matching stays on the bare path.
-        let pathAndQuery = (request.url?.query).map { "\(path)?\($0)" } ?? path
+        let wireComponents = request.url.flatMap {
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)
+        }
+        let wirePathAndQuery =
+            (wireComponents?.percentEncodedPath ?? path)
+            + (wireComponents?.percentEncodedQuery.map { "?\($0)" } ?? "")
         Self.record(
-            path: pathAndQuery, headers: request.allHTTPHeaderFields ?? [:],
+            path: wirePathAndQuery, headers: request.allHTTPHeaderFields ?? [:],
             body: capturedBody())
         guard let stub = Self.match(path) else {
             client?.urlProtocol(

@@ -258,6 +258,22 @@ await client.registerInstall()
 Route the URL yourself; optionally also pass it to `handleDeepLink` for
 `deeplink_open` paywall rules.
 
+An email service provider (Mailchimp, SendGrid, …) rewrites a link through
+its own click-tracking domain before the customer ever sees it. Pass one of
+those through `resolveDeepLink(_:)` to get the app's own link back before
+routing and handing it to `handleDeepLink`:
+
+```swift
+let unwrapped = await client.resolveDeepLink(url)
+router.open(unwrapped)
+Task { await client.handleDeepLink(unwrapped) }
+```
+
+Never throws. A lookup failure, an input over 1024 characters, or an input
+that is not already an `http`/`https` URL returns the input unchanged with no
+request sent. The result can still be an http(s) URL when the chain could not
+be unwrapped, so check its scheme before routing.
+
 ### `RevnixConfig` knobs
 
 Everything but `apiKey` and `baseURL` has a default:
