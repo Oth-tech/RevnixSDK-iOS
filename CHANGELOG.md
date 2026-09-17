@@ -9,6 +9,11 @@
   same-network click within the last hour — at most once per install, on the
   main actor, from `registerInstall(platform:appVersion:)`'s response.
   `registerInstall` now reports the platform for you when none is passed. (REV-299)
+- **`resolveDeepLink(_:)`.** Unwraps a link an email service provider
+  (Mailchimp, SendGrid, …) rewrote through its own click-tracking domain back
+  to the app's own deep link, so it can be routed and handed to
+  `handleDeepLink(_:)`. Never throws — a lookup failure returns the input URL
+  unchanged. (REV-299)
 - **Dashboard QR/link paywall preview.** A preview link
   (`<scheme>://revnix-preview?revnix_preview=<token>`) handed to
   `handleDeepLink(_:)` fetches the draft paywall and hands it to

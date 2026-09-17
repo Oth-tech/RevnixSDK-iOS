@@ -189,6 +189,37 @@ public actor RevnixClient {
         _ = await fireImplicit(.deeplinkOpen, extra: extra, present: present)
     }
 
+    /// Unwrap a link an email service provider (Mailchimp, SendGrid, …)
+    /// rewrote through its own click-tracking domain, e.g.
+    /// `https://click.mailchimp.com/track/abc` back to
+    /// `com.voigu.app://promo?utm_source=email&utm_campaign=summer50`. Route
+    /// on the result and pass it to `handleDeepLink` as usual; a lookup
+    /// failure — or an input the server would 400 on — hands the input URL
+    /// straight back unchanged, so the result may still be an http(s) URL
+    /// when the chain could not be unwrapped: check the scheme before
+    /// routing.
+    public func resolveDeepLink(_ url: URL) async -> URL {
+        let raw = url.absoluteString
+        guard raw.count <= 1024, let scheme = url.scheme?.lowercased(),
+            scheme == "http" || scheme == "https"
+        else { return url }
+        do {
+            let data = try await request(
+                path: "/v1/links/resolve", method: "GET",
+                query: [URLQueryItem(name: "url", value: raw)])
+            let body = try decode(ResolveDeepLinkResponse.self, from: data)
+            return URL(string: body.url) ?? url
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "resolveDeepLink", message: "\(error)")
+            return url
+        }
+    }
+
+    private struct ResolveDeepLinkResponse: Decodable {
+        let url: String
+    }
+
     private static let previewTokenPattern = try! NSRegularExpression(
         pattern: "[?&]revnix_preview=([0-9a-f]{64})(?:[&#]|$)")
 
@@ -911,7 +942,13 @@ public actor RevnixClient {
         if let query,
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         {
-            components.queryItems = query
+            let allowed = CharacterSet.urlQueryAllowed.subtracting(
+                CharacterSet(charactersIn: "+&=?/:#"))
+            components.percentEncodedQueryItems = query.map {
+                URLQueryItem(
+                    name: $0.name.addingPercentEncoding(withAllowedCharacters: allowed) ?? $0.name,
+                    value: $0.value?.addingPercentEncoding(withAllowedCharacters: allowed))
+            }
             url = components.url ?? url
         }
         var req = URLRequest(url: url)
