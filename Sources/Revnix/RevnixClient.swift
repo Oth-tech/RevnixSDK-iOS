@@ -181,6 +181,7 @@ public actor RevnixClient {
             await presentPreview(token)
             return
         }
+        recordLastDeepLink(url)
         let extra: [String: JSONValue] = [
             "url": .string(String(raw.prefix(1024))),
         ]
@@ -218,6 +219,35 @@ public actor RevnixClient {
 
     private struct ResolveDeepLinkResponse: Decodable {
         let url: String
+    }
+
+    /// The most recent deep link this device received — an ordinary
+    /// `handleDeepLink` call or a delivered deferred deep link, whichever was
+    /// last — for asking again after the original delivery got swallowed
+    /// (e.g. by login/onboarding). Dashboard preview links are never
+    /// recorded. Persisted, so it survives relaunch and logout. Never throws;
+    /// nil when nothing is stored or the stored value is malformed.
+    public func lastDeepLink() -> LastDeepLink? {
+        guard let raw = config.storage.get(Keys.lastDeepLink),
+            let data = raw.data(using: .utf8),
+            let stored = try? JSONDecoder().decode(StoredDeepLink.self, from: data),
+            let url = URL(string: stored.url)
+        else { return nil }
+        return LastDeepLink(
+            url: url, receivedAt: Date(timeIntervalSince1970: Double(stored.receivedAt) / 1000))
+    }
+
+    private struct StoredDeepLink: Codable {
+        let url: String
+        let receivedAt: Int
+    }
+
+    private func recordLastDeepLink(_ url: URL) {
+        let stored = StoredDeepLink(url: url.absoluteString, receivedAt: nowMs())
+        guard let data = try? JSONEncoder().encode(stored),
+            let raw = String(data: data, encoding: .utf8)
+        else { return }
+        config.storage.set(Keys.lastDeepLink, raw)
     }
 
     private static let previewTokenPattern = try! NSRegularExpression(
@@ -760,6 +790,7 @@ public actor RevnixClient {
             let response = try? JSONDecoder().decode(InstallResponse.self, from: data),
             let link = response.deferredDeepLink
         else { return }
+        recordLastDeepLink(link.url)
         await MainActor.run { handler(link.url, link.match) }
     }
 
@@ -1041,6 +1072,7 @@ public actor RevnixClient {
             "revnix.installReported.\(cid)"
         }
         static let deferredDeepLinkDelivered = "revnix.deferredDeepLinkDelivered"
+        static let lastDeepLink = "revnix.lastDeepLink"
     }
 
     private func nowMs() -> Int { Int(config.now().timeIntervalSince1970 * 1000) }

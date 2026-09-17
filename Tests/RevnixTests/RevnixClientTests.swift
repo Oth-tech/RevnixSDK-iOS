@@ -894,6 +894,71 @@ final class RevnixClientTests: XCTestCase {
         await client.registerInstall()
     }
 
+    func testLastDeepLinkIsNilBeforeAnyLinkArrives() async throws {
+        let client = makeClient()
+        let last = await client.lastDeepLink()
+        XCTAssertNil(last)
+    }
+
+    func testHandleDeepLinkStoresTheFullURLAndReceivedAt() async throws {
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "deeplink_open"))
+        let clock = Clock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let client = makeClient(now: clock.now)
+        let url = URL(string: "https://example.com/promo?utm_source=ig&" + String(repeating: "a", count: 2000))!
+
+        await client.handleDeepLink(url)
+
+        let stored = await client.lastDeepLink()
+        let last = try XCTUnwrap(stored)
+        XCTAssertEqual(last.url, url)
+        XCTAssertEqual(last.receivedAt.timeIntervalSince1970, 1_700_000_000)
+    }
+
+    func testALaterDeepLinkOverwritesTheEarlierOne() async throws {
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "deeplink_open"))
+        let client = makeClient()
+        await client.handleDeepLink(URL(string: "https://example.com/first")!)
+        await client.handleDeepLink(URL(string: "https://example.com/second")!)
+
+        let last = await client.lastDeepLink()
+        XCTAssertEqual(last?.url.absoluteString, "https://example.com/second")
+    }
+
+    func testAPreviewLinkIsNeverStoredAsTheLastDeepLink() async throws {
+        StubProtocol.respond(
+            containing: "/v1/paywalls/preview/\(PreviewTests.token)", status: 200,
+            body: PreviewTests.previewBody)
+        let client = makeClient()
+        await client.handleDeepLink(PreviewTests.previewURL)
+
+        let last = await client.lastDeepLink()
+        XCTAssertNil(last)
+    }
+
+    func testADeliveredDeferredDeepLinkIsStoredAsTheLastDeepLink() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200,
+            body: #"{"deferredDeepLink":{"url":"https://example.com/offer","match":"probabilistic"}}"#)
+        let client = makeClient(onDeferredDeepLink: { _, _ in })
+        await client.registerInstall()
+
+        let last = await client.lastDeepLink()
+        XCTAssertEqual(last?.url.absoluteString, "https://example.com/offer")
+    }
+
+    func testMalformedStoredLastDeepLinkReadsAsNil() async throws {
+        let storage = MemoryStorage()
+        storage.set("revnix.lastDeepLink", "not json")
+        let client = makeClient(storage: storage)
+
+        let last = await client.lastDeepLink()
+        XCTAssertNil(last)
+    }
+
     func testMalformedDeferredDeepLinkIsIgnoredWithoutFailingTheInstallReport() async throws {
         StubProtocol.respond(
             containing: "/installs", status: 200,

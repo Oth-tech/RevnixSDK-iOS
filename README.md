@@ -175,6 +175,7 @@ Beyond the calls shown above:
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions — `.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error` — i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
+| `client.lastDeepLink() -> LastDeepLink?` | The most recent link this device received: an ordinary `handleDeepLink` call or a delivered deferred deep link, whichever was last. Persisted across launches and logout; `nil` when none has been recorded. Dashboard preview links are never recorded. |
 | `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
@@ -273,6 +274,22 @@ Never throws. A lookup failure, an input over 1024 characters, or an input
 that is not already an `http`/`https` URL returns the input unchanged with no
 request sent. The result can still be an http(s) URL when the chain could not
 be unwrapped, so check its scheme before routing.
+
+### Last deep link
+
+`client.lastDeepLink() -> LastDeepLink?` returns the most recent link this
+device received (`{ url, receivedAt }`), so an app that swallowed a link
+during login/onboarding can ask for it again later:
+
+```swift
+if let last = await client.lastDeepLink() {
+    router.open(last.url)
+}
+```
+
+It is updated by `handleDeepLink` (ordinary links only, not dashboard
+previews) and by a delivered deferred deep link. Persisted, and not cleared
+by `logout()`.
 
 ### `RevnixConfig` knobs
 
