@@ -4,6 +4,9 @@
 
 ### Added
 
+- **`lastDeepLink()`.** The most recent link seen by `handleDeepLink` or a
+  delivered deferred deep link, as `LastDeepLink(url, receivedAt)` or nil,
+  persisted on the device so it can be read again after login or onboarding.
 - **`onDeferredDeepLink`.** `RevnixConfig(onDeferredDeepLink:)` delivers the
   link a customer clicked before installing — probabilistic match from a
   same-network click within the last hour — at most once per install, on the

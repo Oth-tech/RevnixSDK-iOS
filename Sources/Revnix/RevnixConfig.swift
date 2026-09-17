@@ -13,6 +13,13 @@ public enum DeferredDeepLinkMatch: String, Sendable, Decodable {
     case probabilistic
 }
 
+/// The most recent deep link this device received. See
+/// `RevnixClient.lastDeepLink()`.
+public struct LastDeepLink: Sendable, Equatable {
+    public let url: URL
+    public let receivedAt: Date
+}
+
 public struct RevnixConfig: Sendable {
     /// Publishable key (`rvx_pk_live_…` / `rvx_pk_test_…`). The key fixes
     /// app + environment server-side. Secret keys never ship in a binary —
