@@ -24,6 +24,9 @@ Requires iOS 16+ / macOS 13+ / tvOS 16+ / watchOS 9+ and Swift 5.9.
 .package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "0.3.0")
 ```
 
+Until the first tag is cut, pin the branch instead:
+`.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", branch: "main")`.
+
 **CocoaPods**
 
 ```ruby
@@ -176,7 +179,7 @@ Beyond the calls shown above:
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.lastDeepLink() -> LastDeepLink?` | The most recent link this device received: an ordinary `handleDeepLink` call or a delivered deferred deep link, whichever was last. Persisted across launches and logout; `nil` when none has been recorded. Dashboard preview links are never recorded. |
-| `client.start() / stop() async` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
+| `client.start() async` / `client.stop()` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
 ### Implicit placements
@@ -240,9 +243,9 @@ Each callback sees a given open once, so no double-report guard is needed.
 ### Deferred deep links
 
 A click on a Revnix link sends iOS to the App Store, remembering the click
-for up to an hour. `registerInstall(platform:appVersion:)` — leave `platform`
-`nil` and it reports the platform for you — can come back with the link that install
-matched: probabilistic, from a same-network click within that hour, so it can
+for the link's click window (one hour by default, configurable per link up to 24 hours). `registerInstall(platform:appVersion:)` (leave `platform`
+`nil` and it reports the platform for you) can come back with the link that install
+matched: probabilistic, from a same-network click inside that window, so it can
 be wrong on a shared network. Only a link whose scheme matches the app's
 configured URL scheme is ever returned. Pass `onDeferredDeepLink` to get it,
 delivered at most once per install, on the main actor:

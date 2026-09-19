@@ -144,20 +144,6 @@ public enum RevnixPaywallEvent: String, Codable, Sendable, CaseIterable {
     case error
 }
 
-/// What the host tells `RevnixPaywallView` about a purchase it performed
-/// (REV-263). Returning it from the view's `onPurchase` is what lets the
-/// paywall report `.purchaseAbandoned` / `.purchaseFailed` itself — without
-/// it the SDK sees only that checkout STARTED, because the StoreKit call
-/// happens in the host.
-///
-/// `.completed` needs no report of its own: the purchase lands as
-/// `purchase.completed` through `registerPurchase`.
-public enum RevnixPurchaseOutcome: Sendable, Equatable {
-    case completed
-    case cancelled
-    case failed(code: String? = nil, message: String? = nil)
-}
-
 public struct PlacementPackage: Codable, Sendable, Equatable {
     public let packageId: String
     public let productId: String
