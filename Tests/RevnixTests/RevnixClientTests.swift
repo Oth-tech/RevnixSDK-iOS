@@ -971,6 +971,87 @@ final class RevnixClientTests: XCTestCase {
         let cid = storage.get("revnix.customerId") ?? ""
         XCTAssertNotNil(storage.get("revnix.installReported.\(cid)"))
     }
+
+    func testResolvedAppleAttributionLatchesAndSkipsASecondRequest() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200, body: #"{"appleAttribution":"resolved"}"#)
+        let client = makeClient()
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 1)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 1)
+    }
+
+    func testOrganicAppleAttributionLatchesAndSkipsASecondRequest() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200, body: #"{"appleAttribution":"organic"}"#)
+        let client = makeClient()
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 1)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 1)
+    }
+
+    func testPendingAppleAttributionDoesNotLatchAndRetriesOnTheNextCall() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200, body: #"{"appleAttribution":"pending"}"#)
+        let client = makeClient()
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 1)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 2)
+    }
+
+    func testAnInstallOlderThan24HoursLatchesWithoutARequest() async throws {
+        let storage = MemoryStorage()
+        storage.set("revnix.installedAt", "1000")
+        let clock = Clock(start: Date(timeIntervalSince1970: 2 * 24 * 3600))
+        let client = makeClient(now: clock.now, storage: storage)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 0)
+        let cid = storage.get("revnix.customerId") ?? ""
+        XCTAssertNotNil(storage.get("revnix.appleSearchAds.\(cid)"))
+    }
+
+    func testRequestBodyCarriesCustomerIdAndAttributionToken() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200, body: #"{"appleAttribution":"pending"}"#)
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        let cid = storage.get("revnix.customerId") ?? ""
+        XCTAssertTrue(body.contains(#""customerId":"\#(cid)""#), body)
+        XCTAssertTrue(body.contains(#""attributionToken":"tok_abc""#), body)
+    }
+
+    func testAnEmptyTokenDoesNotLatch() async throws {
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "" })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 0)
+        let cid = storage.get("revnix.customerId") ?? ""
+        XCTAssertNil(storage.get("revnix.appleSearchAds.\(cid)"))
+    }
+
+    func testAnOversizedTokenLatchesWithoutARequest() async throws {
+        let client = makeClient()
+        await client.collectAppleSearchAdsAttribution(
+            tokenOverride: { String(repeating: "a", count: 2049) })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 0)
+    }
+
+    func testAThrowingTokenProviderDoesNotLatch() async throws {
+        struct TokenError: Error {}
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { throw TokenError() })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 0)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { throw TokenError() })
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/installs"), 0)
+        let cid = storage.get("revnix.customerId") ?? ""
+        XCTAssertNil(storage.get("revnix.appleSearchAds.\(cid)"))
+    }
 }
 
 // MARK: - Test plumbing
