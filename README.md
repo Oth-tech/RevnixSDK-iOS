@@ -278,6 +278,15 @@ that is not already an `http`/`https` URL returns the input unchanged with no
 request sent. The result can still be an http(s) URL when the chain could not
 be unwrapped, so check its scheme before routing.
 
+### Apple Search Ads attribution
+
+`registerInstall` also mints the AdServices attribution token (iOS only, no
+credentials or dashboard setup) and posts it to the server, which asks Apple
+whether the install came from a Search Ads campaign. Zero host code beyond
+the `registerInstall` call you already make; it retries on every cold start,
+inside the same 24-hour window the server accepts, until Apple gives a
+definitive answer.
+
 ### Last deep link
 
 `client.lastDeepLink() -> LastDeepLink?` returns the most recent link this

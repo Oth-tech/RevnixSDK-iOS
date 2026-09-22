@@ -2,6 +2,9 @@ import Foundation
 #if canImport(StoreKit)
     import StoreKit
 #endif
+#if canImport(AdServices)
+    import AdServices
+#endif
 
 /// Core client — a faithful port of revnix-react's resilience policy
 /// (revnix-sdk `resilience.test.ts` is the behavioral spec):
@@ -25,6 +28,7 @@ public actor RevnixClient {
     private static let expiryGraceMs = 3 * 24 * 3600 * 1000
     private static let rollbackToleranceMs = 5 * 60 * 1000
     private static let cacheCustomers = 4
+    private static let serverReattributionWindowMs = 24 * 3600 * 1000
 
     private var inflightEntitlements: Task<CustomerEntitlements, Error>?
     private var bgFailures = 0
@@ -764,6 +768,7 @@ public actor RevnixClient {
     public func registerInstall(
         platform: String? = nil, appVersion: String? = nil
     ) async {
+        defer { Task { [weak self] in await self?.collectAppleSearchAdsAttribution() } }
         let cid = customerId()
         guard config.storage.get(Keys.installReported(cid)) == nil else { return }
         var body: [String: JSONValue] = [
@@ -796,11 +801,73 @@ public actor RevnixClient {
 
     private struct InstallResponse: Decodable {
         let deferredDeepLink: DeferredDeepLink?
+        let appleAttribution: String?
 
         struct DeferredDeepLink: Decodable {
             let url: URL
             let match: DeferredDeepLinkMatch
         }
+    }
+
+    /// Mints the AdServices attribution token and hands it to the server,
+    /// which posts it on to Apple to learn the Search Ads campaign (if any).
+    /// Fire-and-forget, latched per customer id.
+    public func collectAppleSearchAdsAttribution() async {
+        await collectAppleSearchAdsAttribution(tokenOverride: nil)
+    }
+
+    /// `tokenOverride` is internal on purpose: the tests need a seam because
+    /// the Simulator cannot mint a real token, and the public API must not
+    /// grow a parameter no host should ever pass.
+    func collectAppleSearchAdsAttribution(
+        tokenOverride: (@Sendable () throws -> String)?
+    ) async {
+        let cid = customerId()
+        guard config.storage.get(Keys.appleSearchAds(cid)) == nil else { return }
+
+        if config.storage.get(Keys.installedAt) == nil {
+            config.storage.set(Keys.installedAt, String(nowMs()))
+        }
+
+        if let installedAt = config.storage.get(Keys.installedAt).flatMap(Int.init),
+            installedAt > 0, nowMs() - installedAt > Self.serverReattributionWindowMs
+        {
+            config.storage.set(Keys.appleSearchAds(cid), "1")
+            return
+        }
+
+        #if canImport(AdServices)
+            let token: String
+            do {
+                token = try (tokenOverride ?? { try AAAttribution.attributionToken() })()
+            } catch {
+                diagnostic(op: "collectAppleSearchAdsAttribution", message: "\(error)")
+                return
+            }
+            guard !token.isEmpty else { return }
+            guard token.count <= 2048 else {
+                config.storage.set(Keys.appleSearchAds(cid), "1")
+                return
+            }
+            let body: [String: JSONValue] = [
+                "customerId": .string(cid),
+                "attributionToken": .string(token),
+            ]
+            do {
+                let data = try await request(
+                    path: "/v1/installs", method: "POST", body: body,
+                    headers: await deviceHeaders())
+                let status = (try? decode(InstallResponse.self, from: data))?.appleAttribution
+                if status == "resolved" || status == "organic" {
+                    config.storage.set(Keys.appleSearchAds(cid), "1")
+                }
+            } catch {
+                bgFailures += 1
+                diagnostic(op: "collectAppleSearchAdsAttribution", message: "\(error)")
+            }
+        #else
+            config.storage.set(Keys.appleSearchAds(cid), "1")
+        #endif
     }
 
     /// Fire-and-forget impression beacon (feeds funnels + view conversions).
@@ -1070,6 +1137,9 @@ public actor RevnixClient {
         static func placement(_ key: String) -> String { "revnix.placement.\(key)" }
         static func installReported(_ cid: String) -> String {
             "revnix.installReported.\(cid)"
+        }
+        static func appleSearchAds(_ cid: String) -> String {
+            "revnix.appleSearchAds.\(cid)"
         }
         static let deferredDeepLinkDelivered = "revnix.deferredDeepLinkDelivered"
         static let lastDeepLink = "revnix.lastDeepLink"
