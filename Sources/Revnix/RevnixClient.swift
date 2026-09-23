@@ -789,6 +789,7 @@ public actor RevnixClient {
             let data = try await request(
                 path: "/v1/installs", method: "POST", body: body, headers: await deviceHeaders())
             config.storage.set(Keys.installReported(cid), "1")
+            refreshAttribution()
             await deliverDeferredDeepLink(from: data)
         } catch {
             bgFailures += 1
@@ -869,6 +870,7 @@ public actor RevnixClient {
                 if status == "resolved" || status == "organic" {
                     config.storage.set(Keys.appleSearchAds(cid), "1")
                 }
+                refreshAttribution()
             } catch {
                 bgFailures += 1
                 diagnostic(op: "collectAppleSearchAdsAttribution", message: "\(error)")
@@ -876,6 +878,59 @@ public actor RevnixClient {
         #else
             config.storage.set(Keys.appleSearchAds(cid), "1")
         #endif
+    }
+
+    // MARK: - Install attribution (AT11)
+
+    /// The install-attribution verdict for this customer — which campaign,
+    /// link or referrer this install was credited to, and how confidently.
+    /// Fetched fresh on every call rather than cached in memory, since the
+    /// point is to answer with whatever the server currently believes.
+    ///
+    /// `nil` means no verdict: none has been recorded yet (a normal race on
+    /// the first cold start, before the install report lands), or the read
+    /// failed — a failure reports to `onDiagnostic` as `getAttribution`.
+    /// Never throws. A verdict that DIFFERS from the last one seen also
+    /// reaches `RevnixConfig.onAttribution`, so a host that only wants
+    /// updates need not call this at all.
+    public func getAttribution() async -> RevnixAttribution? {
+        do {
+            let data = try await request(
+                path: "/v1/customers/\(encode(customerId()))/attribution", method: "GET")
+            guard try decode(InstallMatchOnly.self, from: data).installMatch != "unknown"
+            else { return nil }
+            let attribution = try decode(RevnixAttribution.self, from: data)
+            await deliverAttribution(attribution)
+            return attribution
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "getAttribution", message: "\(error)")
+            return nil
+        }
+    }
+
+    private struct InstallMatchOnly: Decodable {
+        let installMatch: String
+    }
+
+    private func deliverAttribution(_ attribution: RevnixAttribution) async {
+        let cached = config.storage.get(Keys.attribution)
+            .flatMap { try? JSONDecoder().decode(RevnixAttribution.self, from: Data($0.utf8)) }
+        guard cached != attribution else { return }
+        if let data = try? JSONEncoder().encode(attribution),
+            let raw = String(data: data, encoding: .utf8)
+        {
+            config.storage.set(Keys.attribution, raw)
+        } else {
+            diagnostic(op: "getAttribution", message: "could not store the attribution verdict")
+        }
+        guard let handler = config.onAttribution else { return }
+        await MainActor.run { handler(attribution) }
+    }
+
+    private func refreshAttribution() {
+        guard config.onAttribution != nil else { return }
+        Task { [weak self] in _ = await self?.getAttribution() }
     }
 
     func setSkanUpdater(_ updater: SkanUpdater?) {
@@ -1222,6 +1277,7 @@ public actor RevnixClient {
         static let skanRegistered = "revnix.skanRegistered"
         static let deferredDeepLinkDelivered = "revnix.deferredDeepLinkDelivered"
         static let lastDeepLink = "revnix.lastDeepLink"
+        static let attribution = "revnix.attribution"
     }
 
     private func nowMs() -> Int { Int(config.now().timeIntervalSince1970 * 1000) }

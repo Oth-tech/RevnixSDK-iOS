@@ -20,6 +20,28 @@ public struct LastDeepLink: Sendable, Equatable {
     public let receivedAt: Date
 }
 
+/// AT11: the install-attribution verdict for a customer. See
+/// `RevnixClient.getAttribution()`. The server's `installMatch: "unknown"`
+/// (no install recorded yet, a normal cold-start race) never reaches a host
+/// as a verdict: `getAttribution()` returns nil and `onAttribution` does not
+/// fire, so there is one "no attribution yet" representation, not two.
+public struct RevnixAttribution: Codable, Equatable, Sendable {
+    /// `referrer`, `click`, `impression` or `organic`.
+    public let installMatch: String
+    /// Unix ms.
+    public let attributedAt: Int
+    /// Unix ms — set when the customer was later re-attributed.
+    public let reattributedAt: Int?
+    public let linkToken: String?
+    public let referrerSource: String?
+    public let matchSignals: [String]?
+    public let source: String?
+    public let medium: String?
+    public let campaign: String?
+    public let term: String?
+    public let content: String?
+}
+
 public struct RevnixConfig: Sendable {
     /// Publishable key (`rvx_pk_live_…` / `rvx_pk_test_…`). The key fixes
     /// app + environment server-side. Secret keys never ship in a binary —
@@ -88,6 +110,17 @@ public struct RevnixConfig: Sendable {
     /// yourself (and, if it should also gate an implicit `deeplink_open`
     /// paywall rule, hand the URL to `handleDeepLink`).
     public var onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)?
+    /// AT11: called on the main actor whenever the install-attribution
+    /// verdict CHANGES — an Apple Search Ads token resolving or a
+    /// re-attribution genuinely changes the answer, so this can fire more
+    /// than once across a session, and never fires twice for the same
+    /// verdict. Fired after `registerInstall(platform:appVersion:)`'s report
+    /// resolves and again after the Search Ads attribution token is
+    /// reported; `getAttribution()` gives the same answer on demand.
+    ///
+    /// Setting this handler is what turns the automatic refresh on: without
+    /// it the SDK never asks for the verdict on its own.
+    public var onAttribution: (@Sendable (RevnixAttribution) -> Void)?
     /// REV-272: the rule the client reads — `implicitPlacements` when set,
     /// else whether a handler is present.
     public var implicitPlacementsEnabled: Bool {
@@ -122,6 +155,7 @@ public struct RevnixConfig: Sendable {
         onImplicitPaywall: (@Sendable (RevnixImplicitTrigger) -> Void)? = nil,
         implicitPlacements: Bool? = nil,
         onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil,
+        onAttribution: (@Sendable (RevnixAttribution) -> Void)? = nil,
         lifecycle: RevnixAppLifecycle = .system,
         sessionTimeout: TimeInterval = revnixDefaultSessionTimeout,
         skan: Bool = true
@@ -140,6 +174,7 @@ public struct RevnixConfig: Sendable {
         self.onImplicitPaywall = onImplicitPaywall
         self.implicitPlacements = implicitPlacements
         self.onDeferredDeepLink = onDeferredDeepLink
+        self.onAttribution = onAttribution
         self.lifecycle = lifecycle
         self.sessionTimeout = sessionTimeout
         self.skan = skan

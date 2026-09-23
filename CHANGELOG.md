@@ -15,6 +15,13 @@
   lock on iOS 16.1+) to Apple — never to Revnix. A value outside 0…63 is
   refused with a diagnostic. `RevnixConfig(skan: false)` opts out of
   SKAdNetwork entirely.
+- **`getAttribution()` and `onAttribution`.** The install-attribution verdict
+  for this customer — `RevnixAttribution(installMatch, attributedAt, …)` or
+  nil when none has been recorded yet or the read failed. Never throws.
+  `RevnixConfig(onAttribution:)` delivers it on the main actor whenever it
+  CHANGES, never twice for the same verdict, and is what turns the automatic
+  refresh after the install and Apple Search Ads reports on: without the
+  handler the SDK never asks for the verdict on its own. (AT11)
 - **`lastDeepLink()`.** The most recent link seen by `handleDeepLink` or a
   delivered deferred deep link, as `LastDeepLink(url, receivedAt)` or nil,
   persisted on the device so it can be read again after login or onboarding.
