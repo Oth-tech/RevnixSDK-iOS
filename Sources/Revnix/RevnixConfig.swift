@@ -100,6 +100,12 @@ public struct RevnixConfig: Sendable {
     /// REV-272: how long the app must have been backgrounded for the return
     /// to count as a new session rather than an app switch. Default 30 min.
     public var sessionTimeout: TimeInterval
+    /// SKAdNetwork, on by default: `registerInstall` registers the app for
+    /// attribution once per install, which is what makes Apple generate the
+    /// install postback at all. Set `false` to opt out entirely — the SDK then
+    /// neither registers the app nor forwards `updateSkanConversionValue`
+    /// calls to Apple.
+    public var skan: Bool
 
     public init(
         apiKey: String,
@@ -117,7 +123,8 @@ public struct RevnixConfig: Sendable {
         implicitPlacements: Bool? = nil,
         onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil,
         lifecycle: RevnixAppLifecycle = .system,
-        sessionTimeout: TimeInterval = revnixDefaultSessionTimeout
+        sessionTimeout: TimeInterval = revnixDefaultSessionTimeout,
+        skan: Bool = true
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -135,5 +142,6 @@ public struct RevnixConfig: Sendable {
         self.onDeferredDeepLink = onDeferredDeepLink
         self.lifecycle = lifecycle
         self.sessionTimeout = sessionTimeout
+        self.skan = skan
     }
 }

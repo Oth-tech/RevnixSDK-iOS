@@ -4,6 +4,17 @@
 
 ### Added
 
+- **SKAdNetwork registration.** `registerInstall(platform:appVersion:)` now
+  registers the app for SKAdNetwork attribution once per install — without
+  that call Apple generates no install postback at all. Requires the app's
+  `Info.plist` to carry `NSAdvertisingAttributionReportEndpoint` set to
+  `https://revnix.io` — the bare apex, the same for every customer, since
+  Apple keeps only the registrable domain and drops a subdomain or path.
+- **`updateSkanConversionValue(_:coarse:lockWindow:)`.** Reports a SKAdNetwork
+  conversion value (fine 0…63, plus an optional `RevnixCoarseValue` and window
+  lock on iOS 16.1+) to Apple — never to Revnix. A value outside 0…63 is
+  refused with a diagnostic. `RevnixConfig(skan: false)` opts out of
+  SKAdNetwork entirely.
 - **`lastDeepLink()`.** The most recent link seen by `handleDeepLink` or a
   delivered deferred deep link, as `LastDeepLink(url, receivedAt)` or nil,
   persisted on the device so it can be read again after login or onboarding.

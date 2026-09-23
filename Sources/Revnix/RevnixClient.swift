@@ -6,6 +6,8 @@ import Foundation
     import AdServices
 #endif
 
+typealias SkanUpdater = @Sendable (Int, RevnixCoarseValue?, Bool) async throws -> Void
+
 /// Core client — a faithful port of revnix-react's resilience policy
 /// (revnix-sdk `resilience.test.ts` is the behavioral spec):
 /// - entitlements are network-first; TRANSIENT failures serve the cache
@@ -78,6 +80,9 @@ public actor RevnixClient {
     /// existing base on the first launch after an SDK upgrade, and again
     /// after every `logout()`.
     private var mintedThisLaunch = false
+    var skanUpdater: SkanUpdater?
+    private var skanUpdatesInFlight = 0
+    private var skanRegisteredByHostUpdate = false
 
     public init(_ config: RevnixConfig) {
         self.config = config
@@ -768,7 +773,10 @@ public actor RevnixClient {
     public func registerInstall(
         platform: String? = nil, appVersion: String? = nil
     ) async {
-        defer { Task { [weak self] in await self?.collectAppleSearchAdsAttribution() } }
+        defer {
+            Task { [weak self] in await self?.collectAppleSearchAdsAttribution() }
+            Task { [weak self] in await self?.armSkan() }
+        }
         let cid = customerId()
         guard config.storage.get(Keys.installReported(cid)) == nil else { return }
         var body: [String: JSONValue] = [
@@ -868,6 +876,74 @@ public actor RevnixClient {
         #else
             config.storage.set(Keys.appleSearchAds(cid), "1")
         #endif
+    }
+
+    func setSkanUpdater(_ updater: SkanUpdater?) {
+        skanUpdater = updater
+    }
+
+    private func updateSkan(_ value: Int, _ coarse: RevnixCoarseValue?, _ lockWindow: Bool)
+        async throws
+    {
+        skanUpdatesInFlight += 1
+        defer { skanUpdatesInFlight -= 1 }
+        try await (skanUpdater ?? RevnixSkan.update)(value, coarse, lockWindow)
+    }
+
+    private func markSkanRegistered() {
+        config.storage.set(Keys.skanRegistered, "1")
+    }
+
+    /// Reports a SKAdNetwork conversion value to Apple — never to Revnix. The
+    /// fine value is 0…63; a value outside that range is refused here rather
+    /// than thrown away inside Apple's API. `coarse`/`lockWindow` need iOS
+    /// 16.1; below that only the fine value is sent.
+    public func updateSkanConversionValue(
+        _ value: Int, coarse: RevnixCoarseValue? = nil, lockWindow: Bool = false
+    ) async {
+        guard config.skan else {
+            diagnostic(op: "updateSkanConversionValue", message: "skan disabled by config")
+            return
+        }
+        guard (0...63).contains(value) else {
+            diagnostic(
+                op: "updateSkanConversionValue", message: "conversion value \(value) out of 0...63")
+            return
+        }
+        if lockWindow, coarse == nil {
+            diagnostic(
+                op: "updateSkanConversionValue",
+                message:
+                    "Apple ignores lockWindow without a coarse value; sending \(value) unlocked")
+        }
+        do {
+            try await updateSkan(value, coarse, lockWindow)
+        } catch {
+            diagnostic(op: "updateSkanConversionValue", message: "\(error)")
+            return
+        }
+        skanRegisteredByHostUpdate = true
+        markSkanRegistered()
+    }
+
+    /// Registers the app for SKAdNetwork attribution, once per install. Apple
+    /// generates no install postback at all until this call happens.
+    private func armSkan() async {
+        guard config.skan, skanUpdater != nil || RevnixSkan.isSupported else { return }
+        guard skanUpdatesInFlight == 0, config.storage.get(Keys.skanRegistered) == nil else {
+            return
+        }
+        // Latched before the await, not after: a second `registerInstall` must
+        // see the claim. A genuine failure gives it back for the next launch.
+        markSkanRegistered()
+        do {
+            try await updateSkan(0, nil, false)
+        } catch {
+            if !skanRegisteredByHostUpdate {
+                config.storage.remove(Keys.skanRegistered)
+            }
+            diagnostic(op: "armSkan", message: "\(error)")
+        }
     }
 
     /// Fire-and-forget impression beacon (feeds funnels + view conversions).
@@ -1141,6 +1217,9 @@ public actor RevnixClient {
         static func appleSearchAds(_ cid: String) -> String {
             "revnix.appleSearchAds.\(cid)"
         }
+        /// Deliberately not per customer id: SKAdNetwork registration is per
+        /// install, and `logout()` must not re-arm it.
+        static let skanRegistered = "revnix.skanRegistered"
         static let deferredDeepLinkDelivered = "revnix.deferredDeepLinkDelivered"
         static let lastDeepLink = "revnix.lastDeepLink"
     }

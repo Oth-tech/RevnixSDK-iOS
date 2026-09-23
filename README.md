@@ -287,6 +287,37 @@ the `registerInstall` call you already make; it retries on every cold start,
 inside the same 24-hour window the server accepts, until Apple gives a
 definitive answer.
 
+### SKAdNetwork
+
+`registerInstall` also registers the app for SKAdNetwork attribution, once per
+install — Apple generates no install postback at all until an app makes that
+call. Report a conversion value whenever your funnel reaches a milestone worth
+measuring:
+
+```swift
+await client.updateSkanConversionValue(12, coarse: .high, lockWindow: false)
+```
+
+The fine value is 0…63; anything outside that range is refused without calling
+Apple. `coarse`/`lockWindow` need iOS 16.1 — below that only the fine value is
+sent. Values go to Apple only, never to Revnix. Opt out entirely with
+`RevnixConfig(skan: false)`: the SDK then neither registers the app nor
+forwards these calls.
+
+Your app must also add `NSAdvertisingAttributionReportEndpoint` to its
+`Info.plist`, or Apple never delivers your copy of
+the winning postback. The value is the bare apex and identical for every
+Revnix customer, because Apple keeps only the registrable part of the domain —
+a subdomain or a path is dropped:
+
+```xml
+<key>NSAdvertisingAttributionReportEndpoint</key>
+<string>https://revnix.io</string>
+```
+
+Apple then POSTs to
+`https://revnix.io/.well-known/skadnetwork/report-attribution/`.
+
 ### Last deep link
 
 `client.lastDeepLink() -> LastDeepLink?` returns the most recent link this
