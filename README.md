@@ -179,6 +179,7 @@ Beyond the calls shown above:
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.lastDeepLink() -> LastDeepLink?` | The most recent link this device received: an ordinary `handleDeepLink` call or a delivered deferred deep link, whichever was last. Persisted across launches and logout; `nil` when none has been recorded. Dashboard preview links are never recorded. |
+| `client.getAttribution() -> RevnixAttribution?` | The install-attribution verdict for this customer — `installMatch` plus the campaign fields that apply. `nil` when none has been recorded yet (a normal cold-start race) or the read failed. Never throws; fetched fresh on every call. Pass `onAttribution` to be told when it changes instead. |
 | `client.start() async` / `client.stop()` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
@@ -333,6 +334,33 @@ if let last = await client.lastDeepLink() {
 It is updated by `handleDeepLink` (ordinary links only, not dashboard
 previews) and by a delivered deferred deep link. Persisted, and not cleared
 by `logout()`.
+
+### Install attribution
+
+`client.getAttribution() -> RevnixAttribution?` answers which campaign, link
+or referrer this install was credited to (`installMatch` is `referrer`,
+`click`, `impression` or `organic`, plus `attributedAt` and whichever of
+`linkToken`, `referrerSource`, `matchSignals`, `source`, `medium`,
+`campaign`, `term`, `content` apply). `nil` means no verdict yet — a normal
+race on the first cold start — or a failed read, reported to `onDiagnostic`.
+Never throws.
+
+Pass `onAttribution` to be told when the verdict CHANGES instead of polling —
+a Search Ads token resolving or a re-attribution changes it, so it can fire
+more than once, but never twice for the same verdict:
+
+```swift
+let client = RevnixClient(RevnixConfig(
+    apiKey: "rvx_pk_live_…",
+    baseURL: URL(string: "https://your-deployment.convex.site")!,
+    onAttribution: { attribution in analytics.setCampaign(attribution.campaign) }
+))
+```
+
+The handler runs on the main actor. Setting it is what turns the automatic
+refresh on: the SDK then asks for the verdict after `registerInstall`'s
+report and after the Search Ads token is reported, and makes no extra request
+at all without it.
 
 ### `RevnixConfig` knobs
 
