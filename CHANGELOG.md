@@ -4,6 +4,9 @@
 
 ### Added
 
+- **Previous session length on `session_start`.** The `session_start`
+  implicit trigger now carries `previousSessionMs`, the wall-clock length of
+  the session that just ended, whenever one is known. (AT16)
 - **SKAdNetwork registration.** `registerInstall(platform:appVersion:)` now
   registers the app for SKAdNetwork attribution once per install — without
   that call Apple generates no install postback at all. Requires the app's
