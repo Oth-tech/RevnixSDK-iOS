@@ -1052,6 +1052,34 @@ final class RevnixClientTests: XCTestCase {
         let cid = storage.get("revnix.customerId") ?? ""
         XCTAssertNil(storage.get("revnix.appleSearchAds.\(cid)"))
     }
+
+    func testLogAdRevenueSendsPathMethodAndBodyKeys() async throws {
+        StubProtocol.respond(containing: "/v1/ad-revenue", status: 200, body: "{}")
+        let client = makeClient()
+        await client.logAdRevenue(
+            revenue: 0.0032, currency: "USD", network: "admob", mediation: "applovin_max",
+            adUnit: "unit_1", placement: "interstitial_1", format: "interstitial",
+            eventId: "evt_1")
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/v1/ad-revenue"))
+        XCTAssertEqual(path, "/v1/ad-revenue")
+        let method = try XCTUnwrap(StubProtocol.lastMethod(containing: "/v1/ad-revenue"))
+        XCTAssertEqual(method, "POST")
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/ad-revenue"))
+        XCTAssertTrue(body.contains(#""revenue":0.0032"#), body)
+        XCTAssertTrue(body.contains(#""currency":"USD""#), body)
+        XCTAssertTrue(body.contains(#""network":"admob""#), body)
+        XCTAssertTrue(body.contains(#""mediation":"applovin_max""#), body)
+        XCTAssertTrue(body.contains(#""adUnit":"unit_1""#), body)
+        XCTAssertTrue(body.contains(#""placement":"interstitial_1""#), body)
+        XCTAssertTrue(body.contains(#""format":"interstitial""#), body)
+        XCTAssertTrue(body.contains(#""eventId":"evt_1""#), body)
+    }
+
+    func testLogAdRevenueWithZeroRevenueSendsNoRequest() async throws {
+        let client = makeClient()
+        await client.logAdRevenue(revenue: 0, currency: "USD")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/ad-revenue"), 0)
+    }
 }
 
 // MARK: - Test plumbing
@@ -1107,6 +1135,7 @@ final class StubProtocol: URLProtocol {
     }
     struct Recorded {
         let path: String
+        let method: String
         let headers: [String: String]
         let body: String
     }
@@ -1200,10 +1229,18 @@ final class StubProtocol: URLProtocol {
         return recorded.last { $0.path.contains(substring) }?.body
     }
 
-    private static func record(path: String, headers: [String: String], body: String) {
+    static func lastMethod(containing substring: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        recorded.append(Recorded(path: path, headers: headers, body: body))
+        return recorded.last { $0.path.contains(substring) }?.method
+    }
+
+    private static func record(
+        path: String, method: String, headers: [String: String], body: String
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(Recorded(path: path, method: method, headers: headers, body: body))
     }
 
     /// URLSession hands URLProtocol an upload body as a stream, not
@@ -1250,8 +1287,8 @@ final class StubProtocol: URLProtocol {
             (wireComponents?.percentEncodedPath ?? path)
             + (wireComponents?.percentEncodedQuery.map { "?\($0)" } ?? "")
         Self.record(
-            path: wirePathAndQuery, headers: request.allHTTPHeaderFields ?? [:],
-            body: capturedBody())
+            path: wirePathAndQuery, method: request.httpMethod ?? "",
+            headers: request.allHTTPHeaderFields ?? [:], body: capturedBody())
         guard let stub = Self.match(path) else {
             client?.urlProtocol(
                 self,
