@@ -32,8 +32,9 @@
   delivered deferred deep link, as `LastDeepLink(url, receivedAt)` or nil,
   persisted on the device so it can be read again after login or onboarding.
 - **`onDeferredDeepLink`.** `RevnixConfig(onDeferredDeepLink:)` delivers the
-  link a customer clicked before installing — probabilistic match from a
-  same-network click within the last hour — at most once per install, on the
+  link a customer clicked before installing (probabilistic match from a
+  same-network click inside the link's click window, 1 hour by default,
+  configurable per link up to 24 hours) at most once per install, on the
   main actor, from `registerInstall(platform:appVersion:)`'s response.
   `registerInstall` now reports the platform for you when none is passed. (REV-299)
 - **`resolveDeepLink(_:)`.** Unwraps a link an email service provider
