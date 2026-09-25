@@ -1142,6 +1142,43 @@ public actor RevnixClient {
         }
     }
 
+    /// Report impression-level ad revenue from your mediation SDK's paid-event
+    /// callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue`).
+    /// Fire-and-forget like the other beacons: never throws.
+    public func logAdRevenue(
+        revenue: Double,
+        currency: String,
+        network: String? = nil,
+        mediation: String? = nil,
+        adUnit: String? = nil,
+        placement: String? = nil,
+        format: String? = nil,
+        eventId: String? = nil
+    ) async {
+        guard revenue.isFinite, revenue > 0 else {
+            diagnostic(op: "logAdRevenue", message: "revenue must be a finite value > 0")
+            return
+        }
+        var body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "revenue": .number(revenue),
+            "currency": .string(String(currency.prefix(100))),
+            "sdkVersion": .string(Self.sdkVersion),
+        ]
+        if let v = network { body["network"] = .string(String(v.prefix(100))) }
+        if let v = mediation { body["mediation"] = .string(String(v.prefix(100))) }
+        if let v = adUnit { body["adUnit"] = .string(String(v.prefix(100))) }
+        if let v = placement { body["placement"] = .string(String(v.prefix(100))) }
+        if let v = format { body["format"] = .string(String(v.prefix(100))) }
+        if let v = eventId { body["eventId"] = .string(String(v.prefix(100))) }
+        do {
+            _ = try await request(path: "/v1/ad-revenue", method: "POST", body: body)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "logAdRevenue", message: "\(error)")
+        }
+    }
+
     /// Set attributes on the current customer (REV-033 v2). Attributes are
     /// what A/B-test audiences target — set `country`, `app_version`,
     /// `locale`, or any custom key you want to segment on. A `.null` value
