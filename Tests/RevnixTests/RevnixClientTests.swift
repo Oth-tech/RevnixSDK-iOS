@@ -1080,6 +1080,36 @@ final class RevnixClientTests: XCTestCase {
         await client.logAdRevenue(revenue: 0, currency: "USD")
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/ad-revenue"), 0)
     }
+
+    func testSetAttributionSendsPathMethodAndBodyKeys() async throws {
+        StubProtocol.respond(containing: "/v1/attribution", status: 200, body: "{}")
+        let client = makeClient()
+        await client.setAttribution(
+            provider: "adjust", network: "Facebook Installs", campaign: "summer_sale")
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/v1/attribution"))
+        XCTAssertEqual(path, "/v1/attribution")
+        let method = try XCTUnwrap(StubProtocol.lastMethod(containing: "/v1/attribution"))
+        XCTAssertEqual(method, "POST")
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/attribution"))
+        XCTAssertTrue(body.contains(#""provider":"adjust""#), body)
+        XCTAssertTrue(body.contains(#""network":"Facebook Installs""#), body)
+        XCTAssertTrue(body.contains(#""campaign":"summer_sale""#), body)
+        XCTAssertFalse(body.contains(#""adGroup""#), body)
+        XCTAssertFalse(body.contains(#""creative""#), body)
+    }
+
+    func testSetAttributionRepeatSendsNothingButAChangedPayloadSendsAgain() async throws {
+        StubProtocol.respond(containing: "/v1/attribution", status: 200, body: "{}")
+        let client = makeClient()
+        await client.setAttribution(provider: "adjust", network: "Facebook Installs")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/attribution"), 1)
+
+        await client.setAttribution(provider: "adjust", network: "Facebook Installs")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/attribution"), 1)
+
+        await client.setAttribution(provider: "adjust", network: "Google Installs")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/attribution"), 2)
+    }
 }
 
 // MARK: - Test plumbing
