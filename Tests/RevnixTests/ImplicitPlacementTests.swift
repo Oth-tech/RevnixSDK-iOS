@@ -171,6 +171,105 @@ final class ImplicitPlacementTests: XCTestCase {
                 .contains(#""resolve":false"#), true)
     }
 
+    func testSessionStartCarriesThePreviousSessionLength() async throws {
+        StubProtocol.respond(
+            containing: "/v1/config", status: 200,
+            body: #"{"implicitPlacements":["session_start"]}"#)
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "session_start"))
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        var clockNow = t0
+        var handler: ((RevnixAppState) -> Void)?
+        let lifecycle = RevnixAppLifecycle { h in
+            handler = h
+            return { handler = nil }
+        }
+        let client = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: MemoryStorage(),
+                now: { clockNow },
+                session: URLSession(configuration: {
+                    let config = URLSessionConfiguration.ephemeral
+                    config.protocolClasses = [StubProtocol.self]
+                    return config
+                }()),
+                device: nil,
+                implicitPlacements: true,
+                lifecycle: lifecycle))
+
+        await client.stop()
+        await client.start()
+        XCTAssertEqual(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/placements/triggered"))
+                .contains("previousSessionMs"), false)
+
+        clockNow = t0.addingTimeInterval(10 * 60)
+        handler?(.background)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        clockNow = t0.addingTimeInterval(10 * 60 + 31 * 60)
+        handler?(.foreground)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/placements/triggered"))
+        XCTAssertTrue(body.contains(#""previousSessionMs":600000"#), body)
+    }
+
+    func testSessionStartAcrossAColdStartReadsThePriorClientsBackground() async throws {
+        StubProtocol.respond(
+            containing: "/v1/config", status: 200,
+            body: #"{"implicitPlacements":["session_start"]}"#)
+        StubProtocol.respond(
+            containing: "/v1/placements/triggered", status: 200,
+            body: PreviewTests.triggerBody(placement: "session_start"))
+        let storage = MemoryStorage()
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        var clockNow = t0
+        var handlerA: ((RevnixAppState) -> Void)?
+        let lifecycleA = RevnixAppLifecycle { h in
+            handlerA = h
+            return { handlerA = nil }
+        }
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [StubProtocol.self]
+        let clientA = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: storage,
+                now: { clockNow },
+                session: URLSession(configuration: sessionConfig),
+                device: nil,
+                implicitPlacements: true,
+                lifecycle: lifecycleA))
+        await clientA.stop()
+        await clientA.start()
+
+        clockNow = t0.addingTimeInterval(5 * 60)
+        handlerA?(.background)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        clockNow = t0.addingTimeInterval(2 * 3600)
+        let clientB = RevnixClient(
+            RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: storage,
+                now: { clockNow },
+                session: URLSession(configuration: sessionConfig),
+                device: nil,
+                implicitPlacements: true,
+                lifecycle: .disabled))
+        await clientB.stop()
+        await clientB.start()
+
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/placements/triggered"))
+        XCTAssertTrue(body.contains(#""previousSessionMs":300000"#), body)
+    }
+
     func testStopThenStartClearsTheStoppedFlagSoADeepLinkIsReportedAgain() async throws {
         StubProtocol.respond(
             containing: "/v1/placements/triggered", status: 200,

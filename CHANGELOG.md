@@ -4,12 +4,9 @@
 
 ### Added
 
-- **`logAdRevenue(revenue:currency:network:mediation:adUnit:placement:format:eventId:)`.**
-  Reports impression-level ad revenue from your mediation SDK's paid-event
-  callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue`).
-  Fire-and-forget like the other beacons — a revenue that is not finite or
-  not greater than 0 is refused with a diagnostic and sends no request.
-  (PT8)
+- **Previous session length on `session_start`.** The `session_start`
+  implicit trigger now carries `previousSessionMs`, the wall-clock length of
+  the session that just ended, whenever one is known. (AT16)
 - **SKAdNetwork registration.** `registerInstall(platform:appVersion:)` now
   registers the app for SKAdNetwork attribution once per install — without
   that call Apple generates no install postback at all. Requires the app's
