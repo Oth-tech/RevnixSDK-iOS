@@ -1179,6 +1179,37 @@ public actor RevnixClient {
         }
     }
 
+    /// PT11: forward an MMP's attribution callback (Adjust, AppsFlyer, …) so
+    /// Revnix credits revenue to the right network/campaign.
+    /// Fire-and-forget like the other beacons: never throws.
+    public func setAttribution(
+        provider: String,
+        network: String,
+        campaign: String? = nil,
+        adGroup: String? = nil,
+        creative: String? = nil
+    ) async {
+        let payload = [provider, network, campaign ?? "", adGroup ?? "", creative ?? ""]
+            .joined(separator: "\u{1}")
+        guard config.storage.get(Keys.lastAttribution) != payload else { return }
+        var body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "provider": .string(String(provider.prefix(100))),
+            "network": .string(String(network.prefix(100))),
+            "sdkVersion": .string(Self.sdkVersion),
+        ]
+        if let v = campaign { body["campaign"] = .string(String(v.prefix(100))) }
+        if let v = adGroup { body["adGroup"] = .string(String(v.prefix(100))) }
+        if let v = creative { body["creative"] = .string(String(v.prefix(100))) }
+        do {
+            _ = try await request(path: "/v1/attribution", method: "POST", body: body)
+            config.storage.set(Keys.lastAttribution, payload)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "setAttribution", message: "\(error)")
+        }
+    }
+
     /// Set attributes on the current customer (REV-033 v2). Attributes are
     /// what A/B-test audiences target — set `country`, `app_version`,
     /// `locale`, or any custom key you want to segment on. A `.null` value
@@ -1315,6 +1346,7 @@ public actor RevnixClient {
         static let deferredDeepLinkDelivered = "revnix.deferredDeepLinkDelivered"
         static let lastDeepLink = "revnix.lastDeepLink"
         static let attribution = "revnix.attribution"
+        static let lastAttribution = "revnix.lastAttribution"
     }
 
     private func nowMs() -> Int { Int(config.now().timeIntervalSince1970 * 1000) }

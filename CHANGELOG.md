@@ -10,6 +10,10 @@
   Fire-and-forget like the other beacons — a revenue that is not finite or
   not greater than 0 is refused with a diagnostic and sends no request.
   (PT8)
+- **`setAttribution(provider:network:campaign:adGroup:creative:)`.** Forwards
+  an MMP's attribution callback (Adjust, AppsFlyer, Singular, Branch,
+  Kochava, Tenjin, Airbridge) so Revnix credits revenue to the right
+  network/campaign. Fire-and-forget like `logAdRevenue`. (PT11)
 - **SKAdNetwork registration.** `registerInstall(platform:appVersion:)` now
   registers the app for SKAdNetwork attribution once per install — without
   that call Apple generates no install postback at all. Requires the app's
