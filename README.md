@@ -45,7 +45,7 @@ let client = RevnixClient(RevnixConfig(
 
 // Every resolvePlacement carries the device facts (platform, OS/app version,
 // locale, currency, App Store storefront, model, install date, sandbox, first
-// open) — RevnixConfig(device:) defaults to DeviceFacts.detect(); pass nil to
+// open). RevnixConfig(device:) defaults to DeviceFacts.detect(); pass nil to
 // send nothing. Targeting rules use them from the first launch.
 
 // At app launch: replay store transactions + drain the offline queue.
@@ -173,13 +173,14 @@ Beyond the calls shown above:
 | `client.logout() -> String` | Mints a fresh anonymous customer locally and returns it. Call at sign-out, or the next user inherits the previous one's cached entitlements. |
 | `client.cachedEntitlements() -> CustomerEntitlements?` | Last cached snapshot with the offline policy applied, no network; `nil` when the customer has never had a live read. |
 | `client.logPaywallShown(placementKey:paywallId:) async` | Fire-and-forget impression beacon (feeds funnels and view conversions); failures go to `onDiagnostic`, never thrown. |
-| `client.logPaywallDisplay(placementKey:paywallId:) async -> String?` | The same beacon, but it returns the `viewId` it minted. Use it whenever you intend to report the close or an interaction — that id is what pairs the halves of one display. |
+| `client.logPaywallDisplay(placementKey:paywallId:) async -> String?` | The same beacon, but it returns the `viewId` it minted. Use it whenever you intend to report the close or an interaction: that id is what pairs the halves of one display. |
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
-| `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions — `.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error` — i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
+| `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions (`.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error`), i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
+| `client.logAdRevenue(revenue:currency:network:mediation:adUnit:placement:format:eventId:) async` | Fire-and-forget impression-level ad revenue from a mediation SDK's paid callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue(for:)`). Non-finite or <= 0 revenue sends nothing. Pass `eventId` to make retries idempotent. Appends `ad.revenue`, which feeds only the ROAS table. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.lastDeepLink() -> LastDeepLink?` | The most recent link this device received: an ordinary `handleDeepLink` call or a delivered deferred deep link, whichever was last. Persisted across launches and logout; `nil` when none has been recorded. Dashboard preview links are never recorded. |
-| `client.getAttribution() -> RevnixAttribution?` | The install-attribution verdict for this customer — `installMatch` plus the campaign fields that apply. `nil` when none has been recorded yet (a normal cold-start race) or the read failed. Never throws; fetched fresh on every call. Pass `onAttribution` to be told when it changes instead. |
+| `client.getAttribution() -> RevnixAttribution?` | The install-attribution verdict for this customer: `installMatch` plus the campaign fields that apply. `nil` when none has been recorded yet (a normal cold-start race) or the read failed. Never throws; fetched fresh on every call. Pass `onAttribution` to be told when it changes instead. |
 | `client.start() async` / `client.stop()` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
@@ -188,35 +189,35 @@ Beyond the calls shown above:
 Six placements resolve without a `resolvePlacement` call: `app_install`,
 `app_launch`, `session_start`, `deeplink_open`, `paywall_decline` and
 `transaction_abandon`. Passing `onImplicitPaywall` to `RevnixConfig` turns
-them on (off by default — no handler, no extra requests for the other five
+them on (off by default: no handler, no extra requests for the other five
 moments, though `handleDeepLink` always reports the link it is handed); the
 SDK then asks `GET /v1/config` once and fires only for the moments the
 dashboard configured. `implicitPlacements = false` is an explicit off switch
 for paywalls, but it does not stop `handleDeepLink`'s report.
 The handler runs on the main actor, so present directly. When you present,
-pass `placementKey: trigger.resolution.placementKey` to `RevnixPaywallView`
-— that marks the display as implicit and is what stops a `paywall_decline`
+pass `placementKey: trigger.resolution.placementKey` to `RevnixPaywallView`;
+that marks the display as implicit and is what stops a `paywall_decline`
 paywall from firing `paywall_decline` again. A close is a decline: never
 report one for a display that ended in a purchase.
 
 The dashboard's QR/link paywall preview rides the same `handleDeepLink` call:
 a scanned or tapped preview link (`<scheme>://revnix-preview?revnix_preview=…`)
 is fetched and handed to `onImplicitPaywall` regardless of dashboard
-configuration. Detect it from the trigger's resolution —
-`resolution.placementKey == revnixPreviewPlacementKey` or
-`resolution.preview == true` — before presenting; `RevnixPaywallView` already
+configuration. Detect it from the trigger's resolution
+(`resolution.placementKey == revnixPreviewPlacementKey` or
+`resolution.preview == true`) before presenting; `RevnixPaywallView` already
 disables purchases and analytics on it (a host rendering its own UI must
 check itself).
 
 ### Deep links
 
-SwiftUI — `.onOpenURL` already covers cold start, nothing else to wire:
+SwiftUI: `.onOpenURL` already covers cold start, nothing else to wire:
 
 ```swift
 .onOpenURL { url in Task { await client.handleDeepLink(url) } }
 ```
 
-UIKit with a `SceneDelegate` — the launch URL arrives in `willConnectTo`,
+UIKit with a `SceneDelegate`: the launch URL arrives in `willConnectTo`,
 not in the warm callbacks:
 
 ```swift
@@ -291,7 +292,7 @@ definitive answer.
 ### SKAdNetwork
 
 `registerInstall` also registers the app for SKAdNetwork attribution, once per
-install — Apple generates no install postback at all until an app makes that
+install. Apple generates no install postback at all until an app makes that
 call. Report a conversion value whenever your funnel reaches a milestone worth
 measuring:
 
@@ -300,7 +301,7 @@ await client.updateSkanConversionValue(12, coarse: .high, lockWindow: false)
 ```
 
 The fine value is 0…63; anything outside that range is refused without calling
-Apple. `coarse`/`lockWindow` need iOS 16.1 — below that only the fine value is
+Apple. `coarse`/`lockWindow` need iOS 16.1; below that only the fine value is
 sent. Values go to Apple only, never to Revnix. Opt out entirely with
 `RevnixConfig(skan: false)`: the SDK then neither registers the app nor
 forwards these calls.
@@ -308,7 +309,7 @@ forwards these calls.
 Your app must also add `NSAdvertisingAttributionReportEndpoint` to its
 `Info.plist`, or Apple never delivers your copy of
 the winning postback. The value is the bare apex and identical for every
-Revnix customer, because Apple keeps only the registrable part of the domain —
+Revnix customer, because Apple keeps only the registrable part of the domain:
 a subdomain or a path is dropped:
 
 ```xml
@@ -341,12 +342,12 @@ by `logout()`.
 or referrer this install was credited to (`installMatch` is `referrer`,
 `click`, `impression` or `organic`, plus `attributedAt` and whichever of
 `linkToken`, `referrerSource`, `matchSignals`, `source`, `medium`,
-`campaign`, `term`, `content` apply). `nil` means no verdict yet — a normal
-race on the first cold start — or a failed read, reported to `onDiagnostic`.
+`campaign`, `term`, `content` apply). `nil` means no verdict yet (a normal
+race on the first cold start) or a failed read, reported to `onDiagnostic`.
 Never throws.
 
-Pass `onAttribution` to be told when the verdict CHANGES instead of polling —
-a Search Ads token resolving or a re-attribution changes it, so it can fire
+Pass `onAttribution` to be told when the verdict CHANGES instead of polling.
+A Search Ads token resolving or a re-attribution changes it, so it can fire
 more than once, but never twice for the same verdict:
 
 ```swift
@@ -377,8 +378,11 @@ Everything but `apiKey` and `baseURL` has a default:
 | `device` | `DeviceFacts.detect()` | Device facts sent in the `X-Revnix-Device` header on every placement resolve; `nil` sends nothing. |
 | `onImplicitPaywall` | `nil` | The on-switch for implicit placements; called on the main actor with `RevnixImplicitTrigger { placement, resolution }`. |
 | `implicitPlacements` | `nil` | Explicit override of "on when a handler is present". `false` stops implicit paywalls, not `handleDeepLink`'s report. |
+| `onDeferredDeepLink` | `nil` | Deferred link from `registerInstall`'s response, at most once per install, on the main actor. |
+| `onAttribution` | `nil` | Verdict-change callback; setting it turns on the automatic refresh. |
 | `lifecycle` | `.system` | Foreground/background source for `session_start` (`didBecomeActive` / `didEnterBackground`); `.disabled` keeps launch-time moments only. |
 | `sessionTimeout` | `30 * 60` s | How long the app must be backgrounded for the return to count as a session. |
+| `skan` | `true` | SKAdNetwork registration once per install; `false` opts out and stops forwarding `updateSkanConversionValue`. |
 | `now` / `session` | n/a | Injectable clock and `URLSession` for tests. |
 
 ## Resilience policy
