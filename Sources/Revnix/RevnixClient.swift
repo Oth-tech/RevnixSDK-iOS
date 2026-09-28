@@ -141,12 +141,15 @@ public actor RevnixClient {
         if mintedThisLaunch { moments.append(.appInstall) }
         moments.append(.appLaunch)
         moments.append(.sessionStart)
+        let sessionExtra = consumePreviousSessionMs()
 
         let batch = Task<Bool, Never> { [weak self] in
             var presented = false
             for placement in moments {
                 guard let self else { return presented }
-                let shown = await self.fireImplicit(placement, present: !presented)
+                let shown = await self.fireImplicit(
+                    placement, extra: placement == .sessionStart ? sessionExtra : [:],
+                    present: !presented)
                 presented = presented || shown
             }
             return presented
@@ -308,7 +311,10 @@ public actor RevnixClient {
         case .background:
             // First report wins: a platform that repeats "background" must not
             // keep resetting the clock forward.
-            if lastBackgroundAt == nil { lastBackgroundAt = config.now() }
+            if lastBackgroundAt == nil {
+                lastBackgroundAt = config.now()
+                config.storage.set(Keys.lastBackgroundAt, String(nowMs()))
+            }
         case .foreground:
             // A foreground with no background before it is the launch itself,
             // which the batch already counted — or a duplicate report.
@@ -322,9 +328,22 @@ public actor RevnixClient {
                 // keep firing a moment the operator turned off — or never
                 // fire one they turned on — until the next cold start.
                 implicitConfigTask = nil
-                _ = await fireImplicit(.sessionStart)
+                _ = await fireImplicit(.sessionStart, extra: consumePreviousSessionMs())
             }
         }
+    }
+
+    private func consumePreviousSessionMs() -> [String: JSONValue] {
+        let now = nowMs()
+        defer {
+            config.storage.set(Keys.sessionStartedAt, String(now))
+            config.storage.remove(Keys.lastBackgroundAt)
+        }
+        guard let started = config.storage.get(Keys.sessionStartedAt).flatMap(Int.init),
+            let lastBg = config.storage.get(Keys.lastBackgroundAt).flatMap(Int.init),
+            lastBg >= started
+        else { return [:] }
+        return ["previousSessionMs": .number(Double(lastBg - started))]
     }
 
     /// Which of the six this app has configured. See `implicitConfigTask`.
@@ -1332,6 +1351,8 @@ public actor RevnixClient {
         static let queue = "revnix.pendingPurchases"
         static let cacheIndex = "revnix.entIndex"
         static let installedAt = "revnix.installedAt"
+        static let sessionStartedAt = "revnix.sessionStartedAt"
+        static let lastBackgroundAt = "revnix.lastBackgroundAt"
         static func cache(_ cid: String) -> String { "revnix.ent.\(cid)" }
         static func placement(_ key: String) -> String { "revnix.placement.\(key)" }
         static func installReported(_ cid: String) -> String {
