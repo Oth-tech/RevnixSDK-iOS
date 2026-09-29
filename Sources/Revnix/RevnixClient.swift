@@ -804,6 +804,7 @@ public actor RevnixClient {
         ]
         body["platform"] = .string(platform ?? DeviceFacts.platformName)
         if let v = appVersion { body["appVersion"] = .string(v) }
+        if let k = config.device?.deviceKey { body["deviceKey"] = .string(k) }
         do {
             let data = try await request(
                 path: "/v1/installs", method: "POST", body: body, headers: await deviceHeaders())
@@ -877,10 +878,11 @@ public actor RevnixClient {
                 config.storage.set(Keys.appleSearchAds(cid), "1")
                 return
             }
-            let body: [String: JSONValue] = [
+            var body: [String: JSONValue] = [
                 "customerId": .string(cid),
                 "attributionToken": .string(token),
             ]
+            if let k = config.device?.deviceKey { body["deviceKey"] = .string(k) }
             do {
                 let data = try await request(
                     path: "/v1/installs", method: "POST", body: body,
