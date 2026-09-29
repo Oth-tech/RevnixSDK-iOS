@@ -1229,6 +1229,34 @@ public actor RevnixClient {
         }
     }
 
+    /// Register this device's push token for uninstall measurement: Revnix
+    /// sends a daily silent probe and records `app.uninstalled` when
+    /// APNs/FCM report the token dead. iOS/Android only, fire-and-forget.
+    public func setPushToken(_ token: String) async {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let payload = [customerId(), trimmed].joined(separator: "\u{1}")
+        guard config.storage.get(Keys.lastPushToken) != payload else { return }
+        let body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "platform": .string("ios"),
+            "token": .string(trimmed),
+            "sdkVersion": .string(Self.sdkVersion),
+        ]
+        do {
+            _ = try await request(path: "/v1/push-token", method: "POST", body: body)
+            config.storage.set(Keys.lastPushToken, payload)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "setPushToken", message: "\(error)")
+        }
+    }
+
+    public func setPushToken(_ deviceToken: Data) async {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        await setPushToken(token)
+    }
+
     /// Set attributes on the current customer (REV-033 v2). Attributes are
     /// what A/B-test audiences target — set `country`, `app_version`,
     /// `locale`, or any custom key you want to segment on. A `.null` value
@@ -1368,6 +1396,7 @@ public actor RevnixClient {
         static let lastDeepLink = "revnix.lastDeepLink"
         static let attribution = "revnix.attribution"
         static let lastAttribution = "revnix.lastAttribution"
+        static let lastPushToken = "revnix.lastPushToken"
     }
 
     private func nowMs() -> Int { Int(config.now().timeIntervalSince1970 * 1000) }

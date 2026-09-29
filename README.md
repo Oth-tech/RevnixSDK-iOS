@@ -178,6 +178,7 @@ Beyond the calls shown above:
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions (`.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error`), i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.logAdRevenue(revenue:currency:network:mediation:adUnit:placement:format:eventId:) async` | Fire-and-forget impression-level ad revenue from a mediation SDK's paid callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue(for:)`). Non-finite or <= 0 revenue sends nothing. Pass `eventId` to make retries idempotent. Appends `ad.revenue`, which feeds only the ROAS table. |
 | `client.setAttribution(provider:network:campaign:adGroup:creative:) async` | Fire-and-forget forward of an MMP's attribution callback so Revnix credits revenue to the right network/campaign. Call it from Adjust's attribution callback (`provider: "adjust", network: attribution.network, campaign: attribution.campaign, adGroup: attribution.adgroup, creative: attribution.creative`) or AppsFlyer's `onConversionDataSuccess` (`provider: "appsflyer", network: data["media_source"], campaign: data["campaign"], adGroup: data["af_adset"], creative: data["af_ad"]`, skip when `data["af_status"] == "Organic"`). |
+| `client.setPushToken(_:) async` (`String` or `Data`) | Register this device's push token for uninstall measurement: a daily silent push probes it, and when APNs reports it dead the customer gets `app.uninstalled`. Fire-and-forget, dedupes per customer+token. Call from `didRegisterForRemoteNotificationsWithDeviceToken` (the `Data` overload hex-encodes for you). |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.lastDeepLink() -> LastDeepLink?` | The most recent link this device received: an ordinary `handleDeepLink` call or a delivered deferred deep link, whichever was last. Persisted across launches and logout; `nil` when none has been recorded. Dashboard preview links are never recorded. |
@@ -363,6 +364,27 @@ The handler runs on the main actor. Setting it is what turns the automatic
 refresh on: the SDK then asks for the verdict after `registerInstall`'s
 report and after the Search Ads token is reported, and makes no extra request
 at all without it.
+
+### Uninstall measurement
+
+Revnix measures uninstalls the way Adjust/AppsFlyer do: register the
+device's push token, and once a day a silent push probes it; when APNs
+reports the token dead, the customer gets an `app.uninstalled` event. Call
+it from the push-registration delegate:
+
+```swift
+func application(_ application: UIApplication,
+                  didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    Task { await client.setPushToken(deviceToken) }
+}
+```
+
+A `String` overload is also available for a token you already hex-encoded
+yourself. Fire-and-forget, like the other beacons: never throws, dedupes
+per customer+token. Requires the app's Push Notifications + Background
+Modes → Remote notifications capability; no notification permission
+needed, the probe is silent. See
+[Uninstall measurement](https://revnix.io/docs/uninstall-measurement).
 
 ### `RevnixConfig` knobs
 

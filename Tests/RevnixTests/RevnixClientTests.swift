@@ -1110,6 +1110,39 @@ final class RevnixClientTests: XCTestCase {
         await client.setAttribution(provider: "adjust", network: "Google Installs")
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/attribution"), 2)
     }
+
+    func testSetPushTokenSendsPathMethodAndBodyKeysThenSkipsARepeat() async throws {
+        StubProtocol.respond(containing: "/v1/push-token", status: 200, body: "{}")
+        let client = makeClient()
+        await client.setPushToken("abc123")
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/v1/push-token"))
+        XCTAssertEqual(path, "/v1/push-token")
+        let method = try XCTUnwrap(StubProtocol.lastMethod(containing: "/v1/push-token"))
+        XCTAssertEqual(method, "POST")
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/push-token"))
+        XCTAssertTrue(body.contains(#""platform":"ios""#), body)
+        XCTAssertTrue(body.contains(#""token":"abc123""#), body)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/push-token"), 1)
+
+        await client.setPushToken("abc123")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/push-token"), 1)
+
+        await client.setPushToken("def456")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/push-token"), 2)
+
+        _ = await client.logout()
+        await client.setPushToken("def456")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/push-token"), 3)
+    }
+
+    func testSetPushTokenDataOverloadHexEncodes() async throws {
+        StubProtocol.respond(containing: "/v1/push-token", status: 200, body: "{}")
+        let client = makeClient()
+        let deviceToken = Data([0xDE, 0xAD, 0xBE, 0xEF])
+        await client.setPushToken(deviceToken)
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/push-token"))
+        XCTAssertTrue(body.contains(#""token":"deadbeef""#), body)
+    }
 }
 
 // MARK: - Test plumbing
