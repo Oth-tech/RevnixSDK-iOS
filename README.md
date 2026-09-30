@@ -177,6 +177,7 @@ Beyond the calls shown above:
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions (`.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error`), i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.logAdRevenue(revenue:currency:network:mediation:adUnit:placement:format:eventId:) async` | Fire-and-forget impression-level ad revenue from a mediation SDK's paid callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue(for:)`). Non-finite or <= 0 revenue sends nothing. Pass `eventId` to make retries idempotent. Appends `ad.revenue`, which feeds only the ROAS table. |
+| `client.track(_:properties:eventId:) async` | Fire-and-forget custom in-app event. `event` must match `^[a-z0-9_]{1,64}$` (invalid names send nothing) and lands as `custom.<event>`. `properties` is a flat `[String: JSONValue]` of `.string`, `.number` or `.bool`. Not for purchases — those stay on `registerPurchase`. |
 | `client.setAttribution(provider:network:campaign:adGroup:creative:) async` | Fire-and-forget forward of an MMP's attribution callback so Revnix credits revenue to the right network/campaign. Call it from Adjust's attribution callback (`provider: "adjust", network: attribution.network, campaign: attribution.campaign, adGroup: attribution.adgroup, creative: attribution.creative`) or AppsFlyer's `onConversionDataSuccess` (`provider: "appsflyer", network: data["media_source"], campaign: data["campaign"], adGroup: data["af_adset"], creative: data["af_ad"]`, skip when `data["af_status"] == "Organic"`). |
 | `client.setPushToken(_:) async` (`String` or `Data`) | Register this device's push token for uninstall measurement: a daily silent push probes it, and when APNs reports it dead the customer gets `app.uninstalled`. Fire-and-forget, dedupes per customer+token. Call from `didRegisterForRemoteNotificationsWithDeviceToken` (the `Data` overload hex-encodes for you). |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
@@ -185,6 +186,15 @@ Beyond the calls shown above:
 | `client.getAttribution() -> RevnixAttribution?` | The install-attribution verdict for this customer: `installMatch` plus the campaign fields that apply. `nil` when none has been recorded yet (a normal cold-start race) or the read failed. Never throws; fetched fresh on every call. Pass `onAttribution` to be told when it changes instead. |
 | `client.start() async` / `client.stop()` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
+
+### Custom events
+
+Report any in-app moment that isn't a paywall interaction or a purchase, e.g.
+`level_up` or `onboarding_complete`:
+
+```swift
+await client.track("level_up", properties: ["level": .number(5), "premium": .bool(true)])
+```
 
 ### Implicit placements
 

@@ -1198,6 +1198,33 @@ public actor RevnixClient {
         }
     }
 
+    /// Report a custom in-app event (e.g. "level_up", "onboarding_complete").
+    /// Not for purchases — those stay on `registerPurchase`.
+    /// Fire-and-forget like the other beacons: never throws.
+    public func track(
+        _ event: String,
+        properties: [String: JSONValue]? = nil,
+        eventId: String? = nil
+    ) async {
+        guard event.range(of: "^[a-z0-9_]{1,64}\\z", options: .regularExpression) != nil else {
+            diagnostic(op: "track", message: "event must match ^[a-z0-9_]{1,64}$")
+            return
+        }
+        var body: [String: JSONValue] = [
+            "customerId": .string(customerId()),
+            "event": .string(event),
+            "eventId": .string(eventId ?? UUID().uuidString.lowercased()),
+            "occurredAt": .number(Double(nowMs())),
+        ]
+        if let properties { body["properties"] = .object(properties) }
+        do {
+            _ = try await request(path: "/v1/events", method: "POST", body: body)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "track", message: "\(error)")
+        }
+    }
+
     /// PT11: forward an MMP's attribution callback (Adjust, AppsFlyer, …) so
     /// Revnix credits revenue to the right network/campaign.
     /// Fire-and-forget like the other beacons: never throws.
