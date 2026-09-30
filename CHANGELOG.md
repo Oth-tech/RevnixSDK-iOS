@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`track(_:properties:eventId:)`.** Reports a custom in-app event (name +
+  optional properties) to `POST /v1/events`, landing as `custom.<event>` on
+  the customer's ledger. `event` must match `^[a-z0-9_]{1,64}$` — a mismatch
+  is refused with a diagnostic and sends no request. Fire-and-forget like the
+  other beacons. Not for purchases — those stay on `registerPurchase`. (MS8)
 - **`logAdRevenue(revenue:currency:network:mediation:adUnit:placement:format:eventId:)`.**
   Reports impression-level ad revenue from your mediation SDK's paid-event
   callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue`).

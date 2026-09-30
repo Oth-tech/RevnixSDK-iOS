@@ -1081,6 +1081,28 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/ad-revenue"), 0)
     }
 
+    func testTrackSendsPathMethodAndBodyKeys() async throws {
+        StubProtocol.respond(containing: "/v1/events", status: 200, body: "{}")
+        let client = makeClient()
+        await client.track("level_up", properties: ["level": .number(5), "premium": .bool(true)])
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/v1/events"))
+        XCTAssertEqual(path, "/v1/events")
+        let method = try XCTUnwrap(StubProtocol.lastMethod(containing: "/v1/events"))
+        XCTAssertEqual(method, "POST")
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/events"))
+        XCTAssertTrue(body.contains(#""event":"level_up""#), body)
+        XCTAssertTrue(body.contains(#""level":5"#), body)
+        XCTAssertTrue(body.contains(#""premium":true"#), body)
+        XCTAssertTrue(body.contains(#""eventId":""#), body)
+        XCTAssertTrue(body.contains(#""customerId":""#), body)
+    }
+
+    func testTrackWithInvalidEventNameSendsNoRequest() async throws {
+        let client = makeClient()
+        await client.track("Level Up")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 0)
+    }
+
     func testSetAttributionSendsPathMethodAndBodyKeys() async throws {
         StubProtocol.respond(containing: "/v1/attribution", status: 200, body: "{}")
         let client = makeClient()
