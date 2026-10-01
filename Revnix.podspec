@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
   s.name             = 'Revnix'
   s.version          = '0.3.0'
-  s.summary          = 'Native Swift SDK for Revnix — StoreKit 2 purchases and offline-correct entitlements.'
+  s.summary          = 'Native Swift SDK for Revnix: StoreKit 2 purchases and offline-correct entitlements.'
 
   s.description      = <<-DESC
     StoreKit 2 purchase glue plus an offline-correct entitlement cache: a
