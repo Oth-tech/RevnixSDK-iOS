@@ -8,7 +8,10 @@ let package = Package(
         .library(name: "Revnix", targets: ["Revnix"])
     ],
     targets: [
-        .target(name: "Revnix", path: "Sources/Revnix"),
+        .target(
+            name: "Revnix", path: "Sources/Revnix",
+            resources: [.copy("PrivacyInfo.xcprivacy")]
+        ),
         .testTarget(
             name: "RevnixTests", dependencies: ["Revnix"], path: "Tests/RevnixTests",
             resources: [

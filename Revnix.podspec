@@ -23,5 +23,6 @@ Pod::Spec.new do |s|
   s.watchos.deployment_target = '9.0'
 
   s.source_files     = 'Sources/Revnix/**/*.swift'
+  s.resource_bundles = { 'Revnix_Privacy' => ['Sources/Revnix/PrivacyInfo.xcprivacy'] }
   s.frameworks       = 'Foundation', 'StoreKit'
 end

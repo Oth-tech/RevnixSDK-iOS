@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Privacy manifest.** `PrivacyInfo.xcprivacy` now ships in the package
+  (SwiftPM resource, CocoaPods `Revnix_Privacy` bundle). It declares User ID,
+  Device ID, Purchase History, Product Interaction and Advertising Data,
+  linked to the user, not used for tracking, for app functionality and
+  analytics. No required-reason APIs. (TP8)
 - **`requestTrackingAuthorization()`.** Shows Apple's App Tracking
   Transparency prompt and returns its status: 0 notDetermined, 1 restricted,
   2 denied, 3 authorized, -1 where ATT does not exist (watchOS). Stores
