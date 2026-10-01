@@ -1047,7 +1047,7 @@ public struct RevnixPaywallView: View {
                         .padding(.top, 8)
                 }
                 if let author = present(review?.author) {
-                    Text("— \(author)")
+                    Text(author)
                         .rnType(12)
                         .foregroundStyle(theme.textSecondary)
                         .padding(.top, 6)
