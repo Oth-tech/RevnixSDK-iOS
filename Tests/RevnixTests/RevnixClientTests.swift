@@ -1293,6 +1293,12 @@ final class StubProtocol: URLProtocol {
         return recorded.filter { $0.path.contains(substring) }.count
     }
 
+    static func paths() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.map(\.path)
+    }
+
     /// Header value on the most recent matching request (nil when absent).
     static func lastHeader(_ name: String, containing substring: String) -> String? {
         lock.lock()

@@ -139,6 +139,13 @@ public struct RevnixConfig: Sendable {
     /// neither registers the app nor forwards `updateSkanConversionValue`
     /// calls to Apple.
     public var skan: Bool
+    /// TP3: hold the first `registerInstall` report up to this many seconds
+    /// while the App Tracking Transparency prompt is unanswered, so the
+    /// install reaches your ad networks with the IDFA already on the
+    /// customer. `nil` (the default) never waits. Show the prompt yourself
+    /// with `requestTrackingAuthorization()` alongside it, not after awaiting
+    /// `registerInstall`, or the install sits out the whole timeout.
+    public var attWaitTimeout: TimeInterval?
 
     public init(
         apiKey: String,
@@ -158,7 +165,8 @@ public struct RevnixConfig: Sendable {
         onAttribution: (@Sendable (RevnixAttribution) -> Void)? = nil,
         lifecycle: RevnixAppLifecycle = .system,
         sessionTimeout: TimeInterval = revnixDefaultSessionTimeout,
-        skan: Bool = true
+        skan: Bool = true,
+        attWaitTimeout: TimeInterval? = nil
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -178,5 +186,6 @@ public struct RevnixConfig: Sendable {
         self.lifecycle = lifecycle
         self.sessionTimeout = sessionTimeout
         self.skan = skan
+        self.attWaitTimeout = attWaitTimeout
     }
 }

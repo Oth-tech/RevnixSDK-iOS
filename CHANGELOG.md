@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`requestTrackingAuthorization()`.** Shows Apple's App Tracking
+  Transparency prompt and returns its status: 0 notDetermined, 1 restricted,
+  2 denied, 3 authorized, -1 where ATT does not exist (watchOS). Stores
+  `att_status` on the customer, plus `idfa` when authorized (removed
+  otherwise), for the ad network integrations. Needs
+  `NSUserTrackingUsageDescription` in `Info.plist`. (TP3)
+- **`RevnixConfig.attWaitTimeout`.** Holds the first `registerInstall` report
+  up to this many seconds while the ATT prompt is unanswered, so the install
+  goes out with the IDFA already stored. Off by default. (TP3)
 - **`track(_:properties:eventId:)`.** Reports a custom in-app event (name +
   optional properties) to `POST /v1/events`, landing as `custom.<event>` on
   the customer's ledger. `event` must match `^[a-z0-9_]{1,64}$` — a mismatch
