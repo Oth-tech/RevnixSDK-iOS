@@ -841,6 +841,49 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertTrue(body.contains(#""platform":"\#(DeviceFacts.platformName)""#), body)
     }
 
+    // MARK: - Reinstall device key (MS2)
+
+    /// The Keychain-backed deviceKey rides on the install body but never on
+    /// the per-resolve X-Revnix-Device header.
+    func testRegisterInstallSendsDeviceKeyInBodyButNotInTheDeviceHeader() async throws {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        var device = Self.fixedDevice
+        device.deviceKey = "dk_test"
+        let client = makeClient(device: device)
+        await client.registerInstall()
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertTrue(body.contains(#""deviceKey":"dk_test""#), body)
+        let header = try XCTUnwrap(
+            StubProtocol.lastHeader("X-Revnix-Device", containing: "/installs"))
+        let facts = try Self.decodeDeviceHeader(header)
+        XCTAssertNil(facts["deviceKey"])
+    }
+
+    func testRegisterInstallWithoutADeviceKeyOmitsTheField() async throws {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        let client = makeClient(device: Self.fixedDevice)
+        await client.registerInstall()
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertFalse(body.contains("deviceKey"), body)
+    }
+
+    func testAppleSearchAdsInstallPostAlsoCarriesTheDeviceKey() async throws {
+        StubProtocol.respond(
+            containing: "/installs", status: 200, body: #"{"appleAttribution":"resolved"}"#)
+        var device = Self.fixedDevice
+        device.deviceKey = "dk_test"
+        let client = makeClient(device: device)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertTrue(body.contains(#""deviceKey":"dk_test""#), body)
+    }
+
+    func testKeychainDeviceKeyMintsOnceAndIsStableAcrossReads() throws {
+        let first = DeviceFacts.keychainDeviceKey()
+        try XCTSkipIf(first == nil, "no Keychain access in this test runner")
+        XCTAssertEqual(first, DeviceFacts.keychainDeviceKey())
+    }
+
     func testNoDeferredDeepLinkOnTheWireNeverCallsTheHandler() async throws {
         StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
         let events = Recorder()

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Security)
+    import Security
+#endif
 
 /// REV-268: the device attribute contract, SDK side. Every Revnix SDK sends
 /// the same facts about the device on each placement resolve, in the
@@ -32,6 +35,11 @@ public struct DeviceFacts: Sendable, Equatable {
     public var model: String?
     /// True for a sandbox receipt (development, TestFlight) or a DEBUG build.
     public var sandbox: Bool?
+    /// MS2: an opaque id minted once and kept in the Keychain, which survives
+    /// an app uninstall/reinstall on the same device. Sent only on install
+    /// reports (`/v1/installs`), never on the per-resolve device header — it
+    /// exists to let the server flag a reinstall, not to identify the customer.
+    public var deviceKey: String?
 
     public init(
         platform: String? = nil,
@@ -41,7 +49,8 @@ public struct DeviceFacts: Sendable, Equatable {
         currency: String? = nil,
         storefront: String? = nil,
         model: String? = nil,
-        sandbox: Bool? = nil
+        sandbox: Bool? = nil,
+        deviceKey: String? = nil
     ) {
         self.platform = platform
         self.osVersion = osVersion
@@ -51,6 +60,7 @@ public struct DeviceFacts: Sendable, Equatable {
         self.storefront = storefront
         self.model = model
         self.sandbox = sandbox
+        self.deviceKey = deviceKey
     }
 
     /// What this process can say about itself without asking StoreKit.
@@ -75,7 +85,8 @@ public struct DeviceFacts: Sendable, Equatable {
             currency: currency,
             storefront: nil,
             model: Self.modelIdentifier(),
-            sandbox: Self.isSandbox(bundle: bundle)
+            sandbox: Self.isSandbox(bundle: bundle),
+            deviceKey: Self.keychainDeviceKey()
         )
     }
 
@@ -119,6 +130,48 @@ public struct DeviceFacts: Sendable, Equatable {
             return true
         #else
             return bundle.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+        #endif
+    }
+
+    static func keychainDeviceKey() -> String? {
+        #if canImport(Security)
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.revnix.sdk",
+                kSecAttrAccount as String: "deviceKey",
+                kSecReturnData as String: true,
+            ]
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            if status == errSecSuccess, let data = item as? Data,
+                let key = String(data: data, encoding: .utf8)
+            {
+                return key
+            }
+
+            let newKey = UUID().uuidString.lowercased()
+            let addQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.revnix.sdk",
+                kSecAttrAccount as String: "deviceKey",
+                kSecValueData as String: Data(newKey.utf8),
+                // ThisDeviceOnly excludes this item from iCloud Keychain sync/restore.
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            ]
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            if addStatus == errSecSuccess {
+                return newKey
+            }
+            if addStatus == errSecDuplicateItem {
+                var retryItem: CFTypeRef?
+                guard SecItemCopyMatching(query as CFDictionary, &retryItem) == errSecSuccess,
+                    let data = retryItem as? Data
+                else { return nil }
+                return String(data: data, encoding: .utf8)
+            }
+            return nil
+        #else
+            return nil
         #endif
     }
 
