@@ -81,6 +81,7 @@ public actor RevnixClient {
     /// after every `logout()`.
     private var mintedThisLaunch = false
     var skanUpdater: SkanUpdater?
+    var tracking = RevnixTracking.system
     private var skanUpdatesInFlight = 0
     private var skanRegisteredByHostUpdate = false
 
@@ -795,6 +796,12 @@ public actor RevnixClient {
         defer {
             Task { [weak self] in await self?.collectAppleSearchAdsAttribution() }
             Task { [weak self] in await self?.armSkan() }
+            Task { [weak self] in await self?.resyncTracking() }
+        }
+        if let timeout = config.attWaitTimeout,
+            config.storage.get(Keys.installReported(customerId())) == nil
+        {
+            await waitForTrackingDecision(timeout)
         }
         let cid = customerId()
         guard config.storage.get(Keys.installReported(cid)) == nil else { return }
@@ -1284,6 +1291,61 @@ public actor RevnixClient {
         await setPushToken(token)
     }
 
+    /// Show Apple's App Tracking Transparency prompt and return its answer:
+    /// 0 notDetermined, 1 restricted, 2 denied, 3 authorized, or -1 where
+    /// ATT does not exist (watchOS). iOS prompts once per install and answers
+    /// later calls with the stored choice, so calling this on every launch is
+    /// fine. Needs `NSUserTrackingUsageDescription` in Info.plist, and the app
+    /// must be active, or iOS answers 0 without showing anything.
+    ///
+    /// The answer is stored on the customer as `att_status`, plus `idfa` when
+    /// authorized (removed otherwise), which the ad network integrations read
+    /// to match events. Once stored, later `registerInstall` calls re-read the
+    /// status, so a revoke in Settings removes the `idfa` on the next launch.
+    /// Never throws: a failed store reports to `onDiagnostic` as
+    /// `requestTrackingAuthorization`.
+    public func requestTrackingAuthorization() async -> Int {
+        let status = await tracking.request()
+        await reportTracking(status)
+        return status
+    }
+
+    func setTracking(_ source: RevnixTracking) {
+        tracking = source
+    }
+
+    private func waitForTrackingDecision(_ timeout: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        var status = tracking.status()
+        while status == 0, Date() < deadline, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            status = tracking.status()
+        }
+        await reportTracking(status)
+    }
+
+    private func resyncTracking() async {
+        guard config.storage.get(Keys.lastTracking) != nil else { return }
+        await reportTracking(tracking.status())
+    }
+
+    private func reportTracking(_ status: Int) async {
+        guard (1...3).contains(status) else { return }
+        let idfa = status == 3 ? tracking.idfa() : nil
+        let payload = [customerId(), String(status), idfa ?? ""].joined(separator: "\u{1}")
+        guard config.storage.get(Keys.lastTracking) != payload else { return }
+        do {
+            try await setAttributes([
+                "att_status": .string(RevnixTracking.statusNames[status]),
+                "idfa": idfa.map(JSONValue.string) ?? .null,
+            ])
+            config.storage.set(Keys.lastTracking, payload)
+        } catch {
+            bgFailures += 1
+            diagnostic(op: "requestTrackingAuthorization", message: "\(error)")
+        }
+    }
+
     /// Set attributes on the current customer (REV-033 v2). Attributes are
     /// what A/B-test audiences target — set `country`, `app_version`,
     /// `locale`, or any custom key you want to segment on. A `.null` value
@@ -1424,6 +1486,7 @@ public actor RevnixClient {
         static let attribution = "revnix.attribution"
         static let lastAttribution = "revnix.lastAttribution"
         static let lastPushToken = "revnix.lastPushToken"
+        static let lastTracking = "revnix.lastTracking"
     }
 
     private func nowMs() -> Int { Int(config.now().timeIntervalSince1970 * 1000) }
