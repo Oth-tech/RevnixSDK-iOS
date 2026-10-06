@@ -177,14 +177,15 @@ Beyond the calls shown above:
 | `client.logPaywallClosed(viewId:placementKey:paywallId:) async` | Ends the display `logPaywallDisplay` opened. Idempotent per view id, so a retry or a double-dismiss cannot count two. Without it a funnel knows how many saw the paywall, not how many left without buying. |
 | `client.logPaywallEvent(_:viewId:…) async` | One of the six interactions (`.selected`, `.purchaseStarted`, `.purchaseAbandoned`, `.purchaseFailed`, `.restore`, `.error`), i.e. what happened BETWEEN the display and the close. `RevnixPaywallView` sends all but the purchase outcome, which only your app can see. All six are pure history: over-reporting skews a report, it never grants or revokes access. |
 | `client.logAdRevenue(revenue:currency:network:mediation:adUnit:placement:format:eventId:) async` | Fire-and-forget impression-level ad revenue from a mediation SDK's paid callback (AdMob `paidEventHandler`, AppLovin MAX `didPayRevenue(for:)`). Non-finite or <= 0 revenue sends nothing. Pass `eventId` to make retries idempotent. Appends `ad.revenue`, which feeds only the ROAS table. |
-| `client.track(_:properties:eventId:) async` | Fire-and-forget custom in-app event. `event` must match `^[a-z0-9_]{1,64}$` (invalid names send nothing) and lands as `custom.<event>`. `properties` is a flat `[String: JSONValue]` of `.string`, `.number` or `.bool`. Not for purchases — those stay on `registerPurchase`. |
+| `client.track(_:properties:eventId:) async` | Fire-and-forget custom in-app event. `event` must match `^[a-z0-9_]{1,64}$` (invalid names send nothing) and lands as `custom.<event>`. `properties` is a flat `[String: JSONValue]` of `.string`, `.number` or `.bool`. Not for purchases: those stay on `registerPurchase`. |
 | `client.setAttribution(provider:network:campaign:adGroup:creative:) async` | Fire-and-forget forward of an MMP's attribution callback so Revnix credits revenue to the right network/campaign. Call it from Adjust's attribution callback (`provider: "adjust", network: attribution.network, campaign: attribution.campaign, adGroup: attribution.adgroup, creative: attribution.creative`) or AppsFlyer's `onConversionDataSuccess` (`provider: "appsflyer", network: data["media_source"], campaign: data["campaign"], adGroup: data["af_adset"], creative: data["af_ad"]`, skip when `data["af_status"] == "Organic"`). |
 | `client.setPushToken(_:) async` (`String` or `Data`) | Register this device's push token for uninstall measurement: a daily silent push probes it, and when APNs reports it dead the customer gets `app.uninstalled`. Fire-and-forget, dedupes per customer+token. Call from `didRegisterForRemoteNotificationsWithDeviceToken` (the `Data` overload hex-encodes for you). |
 | `client.requestTrackingAuthorization() async -> Int` | Shows Apple's App Tracking Transparency prompt and returns its answer (`0` notDetermined, `1` restricted, `2` denied, `3` authorized, `-1` where ATT doesn't exist). Stores `att_status` and `idfa` (when authorized) as customer attributes; needs `NSUserTrackingUsageDescription` in Info.plist and an active app. Never throws. |
+| `RevnixClient.setLocale(_ tag: String?)` (static) | Forces every designed paywall rendered after the call into `tag`'s language, regardless of the device's; `nil` clears it. A view's own `locale:` still wins for that one view. |
 | `client.pendingPurchaseCount() -> Int` | Size of the persistent purchase-registration retry queue. |
 | `client.handleDeepLink(_:) async` | Hand over the URL that opened the app (`onOpenURL`, which covers the launch URL too). The one implicit moment the SDK cannot see itself; an ordinary link is always reported so its `link.*` attribution facts land on the customer, and it presents a paywall only when implicit placements are on AND `deeplink_open` is configured, but a dashboard QR/link preview is always handed to `onImplicitPaywall`. |
 | `client.lastDeepLink() -> LastDeepLink?` | The most recent link this device received: an ordinary `handleDeepLink` call or a delivered deferred deep link, whichever was last. Persisted across launches and logout; `nil` when none has been recorded. Dashboard preview links are never recorded. |
-| `client.getAttribution() -> RevnixAttribution?` | The install-attribution verdict for this customer: `installMatch` plus the campaign fields that apply. `nil` when none has been recorded yet (a normal cold-start race) or the read failed. Never throws; fetched fresh on every call. Pass `onAttribution` to be told when it changes instead. |
+| `client.getAttribution() async -> RevnixAttribution?` | The install-attribution verdict for this customer: `installMatch` plus the campaign fields that apply. `nil` when none has been recorded yet (a normal cold-start race) or the read failed. Never throws; fetched fresh on every call. Pass `onAttribution` to be told when it changes instead. |
 | `client.start() async` / `client.stop()` | Implicit placements start automatically from `init` when `onImplicitPaywall` is set and stop in `deinit`; the pair is public for hosts driving their own lifecycle. `stop()` also halts `handleDeepLink`'s reporting, and `start()` resumes it, even with no handler set. |
 | `RevnixError` | What every throwing client call throws. `isRetryable` splits transient cases (`.network`, `.timeout`, `.rateLimited(retryAfterMs:)`, `.server`, `.badResponse`) from deliberate ones (`.auth`, `.notFound`, `.purchaseBlocked`, `.invalid`). A 409 surfaces as `.purchaseBlocked`, including a resolve before anything is published. |
 
@@ -351,7 +352,7 @@ by `logout()`.
 
 ### Install attribution
 
-`client.getAttribution() -> RevnixAttribution?` answers which campaign, link
+`client.getAttribution() async -> RevnixAttribution?` answers which campaign, link
 or referrer this install was credited to (`installMatch` is `referrer`,
 `click`, `impression` or `organic`, plus `attributedAt` and whichever of
 `linkToken`, `referrerSource`, `matchSignals`, `source`, `medium`,
@@ -439,9 +440,10 @@ This is a product contract, not an implementation detail. `revnix-react`'s
 | Retry / poll delays | ±20% jitter; `Retry-After` honored when the server sends it |
 | Swallowed background failures | `onDiagnostic` callback; count rides `X-Revnix-Bg-Failures` |
 
-`waitForEntitlements(seq:)` bypasses the soft TTL (the point of that poll is a
-fresh ledger cursor), and resolves with the last read rather than throwing if
-the ledger never catches up.
+`waitForEntitlements(seq:)` reads entitlements (the first read may come from
+the soft TTL snapshot); the polls after that first read bypass the soft TTL
+(the point of a poll is a fresh ledger cursor), and resolve with the last
+read rather than throwing if the ledger never catches up.
 
 ## Tests
 

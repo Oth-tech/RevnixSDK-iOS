@@ -72,10 +72,15 @@
   revnixPreviewPlacementKey` / `resolution.preview == true`. Never charges
   (`RevnixPaywallView` blocks purchases on it — a tap shows a "Purchases are
   disabled in preview" alert) and never sends paywall analytics.
-- **First published release.** The SDK is installable from Swift Package
-  Manager by pointing Xcode at this repository — the git tag a release cuts is
-  what SPM resolves — and from CocoaPods as the `Revnix` pod. Nothing about
-  the API changed to make this possible; the code was simply never tagged.
+- **`RevnixClient.setLocale(_:)`.** Forces the paywall language for every
+  paywall rendered after the call, regardless of the device's; `nil` clears
+  it. The links-block footer labels follow it too.
+- **`setPushToken(_:)` (`String` or `Data`).** Registers the push token for
+  uninstall measurement.
+- **Keychain `deviceKey` on install reports.** `registerInstall` now carries a
+  Keychain-persisted device key so the server can flag reinstalls.
+- **`previousSessionMs` on `session_start`.** The length of the previous
+  session, in milliseconds. (AT16)
 
 ### Changed
 
