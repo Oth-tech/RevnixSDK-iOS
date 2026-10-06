@@ -102,11 +102,24 @@ public func revnixLocaleChain(
     return chain
 }
 
+private let revnixLocaleOverrideLock = NSLock()
+private var revnixLocaleOverride: String?
+
+func revnixSetLocaleOverride(_ tag: String?) {
+    revnixLocaleOverrideLock.lock()
+    revnixLocaleOverride = (tag?.isEmpty ?? true) ? nil : tag
+    revnixLocaleOverrideLock.unlock()
+}
+
 /// The device's language. `Locale.preferredLanguages` is the user's ordered
 /// list — the first entry is what every other iOS surface localizes to, so a
 /// paywall matching it matches the rest of the app.
 public func revnixDeviceLocale() -> String? {
-    Locale.preferredLanguages.first ?? Locale.current.identifier
+    revnixLocaleOverrideLock.lock()
+    let override = revnixLocaleOverride
+    revnixLocaleOverrideLock.unlock()
+    if let override { return override }
+    return Locale.preferredLanguages.first ?? Locale.current.identifier
 }
 
 // MARK: - Applying a language
@@ -175,6 +188,80 @@ extension PaywallBlockDoc {
         }
         var copy = self
         copy.blocks = blocks.map { revnixLocalize($0, lookup) }
+        copy.localization.defaultLocale = chain[0]
         return copy
     }
+}
+
+private let revnixLinkLabelAliases: [String: String] = [
+    "iw": "he", "in": "id", "no": "nb", "tl": "fil",
+]
+
+private let revnixLinkLabelTable: [String: (restore: String, terms: String, privacy: String)] = [
+    "ar": ("استعادة", "الشروط", "الخصوصية"),
+    "bg": ("Възстановяване", "Условия", "Поверителност"),
+    "bn": ("পুনরুদ্ধার", "শর্তাবলী", "গোপনীয়তা"),
+    "ca": ("Restaura", "Condicions", "Privadesa"),
+    "cs": ("Obnovit", "Podmínky", "Soukromí"),
+    "da": ("Gendan", "Vilkår", "Privatliv"),
+    "de": ("Wiederherstellen", "AGB", "Datenschutz"),
+    "el": ("Επαναφορά", "Όροι", "Απόρρητο"),
+    "en": ("Restore", "Terms", "Privacy"),
+    "es": ("Restaurar", "Términos", "Privacidad"),
+    "et": ("Taasta", "Tingimused", "Privaatsus"),
+    "fa": ("بازیابی", "شرایط", "حریم خصوصی"),
+    "fi": ("Palauta", "Ehdot", "Tietosuoja"),
+    "fil": ("I-restore", "Mga Tuntunin", "Privacy"),
+    "fr": ("Restaurer", "Conditions", "Confidentialité"),
+    "he": ("שחזור", "תנאים", "פרטיות"),
+    "hi": ("पुनर्स्थापित करें", "शर्तें", "गोपनीयता"),
+    "hr": ("Vrati", "Uvjeti", "Privatnost"),
+    "hu": ("Visszaállítás", "Feltételek", "Adatvédelem"),
+    "id": ("Pulihkan", "Ketentuan", "Privasi"),
+    "it": ("Ripristina", "Termini", "Privacy"),
+    "ja": ("購入を復元", "利用規約", "プライバシー"),
+    "ko": ("구매 복원", "이용약관", "개인정보"),
+    "lt": ("Atkurti", "Sąlygos", "Privatumas"),
+    "lv": ("Atjaunot", "Noteikumi", "Privātums"),
+    "ms": ("Pulihkan", "Terma", "Privasi"),
+    "nb": ("Gjenopprett", "Vilkår", "Personvern"),
+    "nl": ("Herstellen", "Voorwaarden", "Privacy"),
+    "pl": ("Przywróć", "Regulamin", "Prywatność"),
+    "pt": ("Restaurar", "Termos", "Privacidade"),
+    "ro": ("Restaurează", "Termeni", "Confidențialitate"),
+    "ru": ("Восстановить", "Условия", "Конфиденциальность"),
+    "sk": ("Obnoviť", "Podmienky", "Súkromie"),
+    "sl": ("Obnovi", "Pogoji", "Zasebnost"),
+    "sr": ("Врати", "Услови", "Приватност"),
+    "sv": ("Återställ", "Villkor", "Integritet"),
+    "th": ("กู้คืน", "ข้อกำหนด", "ความเป็นส่วนตัว"),
+    "tr": ("Geri Yükle", "Koşullar", "Gizlilik"),
+    "uk": ("Відновити", "Умови", "Конфіденційність"),
+    "ur": ("بحال کریں", "شرائط", "رازداری"),
+    "vi": ("Khôi phục", "Điều khoản", "Quyền riêng tư"),
+    "zh": ("恢复购买", "条款", "隐私"),
+    "zh-Hant": ("恢復購買", "條款", "隱私"),
+]
+
+/// The three built-in paywall footer labels (restore/terms/privacy), in the
+/// language `locale` resolves to. Falls back to English for any language not
+/// in the 43-entry table. Mandarin picks traditional script for Taiwan, Hong
+/// Kong and Macau unless the tag is explicitly simplified.
+public func revnixLinkLabels(_ locale: String?) -> (restore: String, terms: String, privacy: String) {
+    revnixLinkLabelTable[revnixLinkLabelTag(locale)] ?? revnixLinkLabelTable["en"]!
+}
+
+private func revnixLinkLabelTag(_ locale: String?) -> String {
+    guard let tag = revnixNormalizeLocale(locale) else { return "en" }
+    let lang = revnixBaseLanguage(tag)
+    if lang == "zh" {
+        let parts = tag.split(separator: "-").dropFirst().map(String.init)
+        let hasHant = parts.contains("Hant")
+        let hasHans = parts.contains("Hans")
+        let region = parts.first { $0.count == 2 && $0.allSatisfy { $0.isUppercase } }
+        let isTraditionalRegion = region.map { ["TW", "HK", "MO"].contains($0) } ?? false
+        return hasHant || (!hasHans && isTraditionalRegion) ? "zh-Hant" : "zh"
+    }
+    let base = revnixLinkLabelAliases[lang] ?? lang
+    return revnixLinkLabelTable.keys.contains(base) ? base : "en"
 }

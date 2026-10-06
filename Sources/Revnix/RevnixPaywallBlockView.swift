@@ -863,17 +863,18 @@ private struct LinksBlockView: View {
     /// An explicit host handler wins over the config URL — the app knows best
     /// how to open its own legal pages; the URL is the no-handler fallback.
     private var items: [Entry] {
+        let labels = revnixLinkLabels(ctx.doc.localization.defaultLocale)
         var out: [Entry] = []
         if block.showRestore ?? true {
-            out.append(Entry(label: "Restore") { ctx.onRestore?() })
+            out.append(Entry(label: labels.restore) { ctx.onRestore?() })
         }
         if block.showTerms ?? true {
             let url = block.termsUrl ?? ctx.footerTermsUrl
-            out.append(Entry(label: "Terms") { open(ctx.onTerms, url) })
+            out.append(Entry(label: labels.terms) { open(ctx.onTerms, url) })
         }
         if block.showPrivacy ?? true {
             let url = block.privacyUrl ?? ctx.footerPrivacyUrl
-            out.append(Entry(label: "Privacy") { open(ctx.onPrivacy, url) })
+            out.append(Entry(label: labels.privacy) { open(ctx.onPrivacy, url) })
         }
         return out
     }
