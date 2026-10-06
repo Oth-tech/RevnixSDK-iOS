@@ -85,6 +85,13 @@ public actor RevnixClient {
     private var skanUpdatesInFlight = 0
     private var skanRegisteredByHostUpdate = false
 
+    /// Forces the paywall language regardless of the device's, for a host
+    /// whose in-app language picker differs from the OS locale. Only
+    /// paywalls rendered AFTER this call pick it up; `nil` clears it.
+    public static func setLocale(_ tag: String?) {
+        revnixSetLocaleOverride(tag)
+    }
+
     public init(_ config: RevnixConfig) {
         self.config = config
         if let injected = config.session {

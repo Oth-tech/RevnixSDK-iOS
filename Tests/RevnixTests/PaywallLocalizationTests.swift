@@ -14,6 +14,11 @@ import XCTest
 /// must reach its language, and the overlay must disturb nothing but words.
 final class PaywallLocalizationTests: XCTestCase {
 
+    override func tearDown() {
+        RevnixClient.setLocale(nil)
+        super.tearDown()
+    }
+
     private static let doc = """
         {
           "version": 1, "background": "#101014", "textColor": "#F5F7FA",
@@ -168,5 +173,53 @@ final class PaywallLocalizationTests: XCTestCase {
         let doc = try JSONDecoder().decode(PaywallBlockDoc.self, from: Data(json.utf8))
         XCTAssertTrue(doc.localization.isEmpty)
         XCTAssertEqual(text(doc.localized("es").blocks.first), "Unlock Pro")
+    }
+
+    func testLocalizedSetsDefaultLocaleToTheResolvedLanguage() throws {
+        let out = try decoded().localized("es-MX")
+        XCTAssertEqual(out.localization.defaultLocale, "es")
+    }
+
+    func testLinkLabelsResolveUrdu() {
+        XCTAssertEqual(revnixLinkLabels("ur").restore, "بحال کریں")
+        XCTAssertEqual(revnixLinkLabels("ur-PK").restore, "بحال کریں")
+    }
+
+    func testLinkLabelsPickTraditionalChineseForTaiwanHongKong() {
+        XCTAssertEqual(revnixLinkLabels("zh-Hant-TW").restore, "恢復購買")
+        XCTAssertEqual(revnixLinkLabels("zh-TW").restore, "恢復購買")
+        XCTAssertEqual(revnixLinkLabels("zh-HK").restore, "恢復購買")
+    }
+
+    func testLinkLabelsPickSimplifiedChineseOtherwise() {
+        XCTAssertEqual(revnixLinkLabels("zh-Hans-HK").restore, "恢复购买")
+        XCTAssertEqual(revnixLinkLabels("zh-CN").restore, "恢复购买")
+        XCTAssertEqual(revnixLinkLabels("zh").restore, "恢复购买")
+    }
+
+    func testLinkLabelsResolveAliasedTags() {
+        XCTAssertEqual(revnixLinkLabels("iw").restore, "שחזור")
+        XCTAssertEqual(revnixLinkLabels("no").restore, "Gjenopprett")
+    }
+
+    func testLinkLabelsFallBackToEnglish() {
+        XCTAssertEqual(revnixLinkLabels("xx").restore, "Restore")
+        XCTAssertEqual(revnixLinkLabels(nil).restore, "Restore")
+        XCTAssertEqual(revnixLinkLabels("").restore, "Restore")
+    }
+
+    func testLinkLabelsNormalizeUnderscoredTags() {
+        XCTAssertEqual(revnixLinkLabels("pt_BR").restore, "Restaurar")
+    }
+
+    func testSetLocaleOverridesTheDeviceLocaleUntilCleared() {
+        let device = revnixDeviceLocale()
+        RevnixClient.setLocale("ur")
+        XCTAssertEqual(revnixDeviceLocale(), "ur")
+        RevnixClient.setLocale(nil)
+        XCTAssertEqual(revnixDeviceLocale(), device)
+        RevnixClient.setLocale("ur")
+        RevnixClient.setLocale("")
+        XCTAssertEqual(revnixDeviceLocale(), device)
     }
 }
