@@ -31,6 +31,7 @@ public actor RevnixClient {
     private static let rollbackToleranceMs = 5 * 60 * 1000
     private static let cacheCustomers = 4
     private static let serverReattributionWindowMs = 24 * 3600 * 1000
+    private static let skanManagedWindowSec = 35 * 24 * 3600
 
     private var inflightEntitlements: Task<CustomerEntitlements, Error>?
     private var bgFailures = 0
@@ -802,7 +803,10 @@ public actor RevnixClient {
     ) async {
         defer {
             Task { [weak self] in await self?.collectAppleSearchAdsAttribution() }
-            Task { [weak self] in await self?.armSkan() }
+            Task { [weak self] in
+                await self?.armSkan()
+                await self?.syncManagedSkan()
+            }
             Task { [weak self] in await self?.resyncTracking() }
         }
         if let timeout = config.attWaitTimeout,
@@ -1034,6 +1038,59 @@ public actor RevnixClient {
             }
             diagnostic(op: "armSkan", message: "\(error)")
         }
+    }
+
+    private struct SkanManagedResponse: Decodable {
+        let managed: Bool
+        let fine: Int?
+        let coarse: String?
+    }
+
+    private func syncManagedSkan() async {
+        guard config.skan, skanUpdater != nil || RevnixSkan.isSupported else { return }
+        let nowSec = nowMs() / 1000
+        let firstSyncAt: Int
+        if let stored = config.storage.get(Keys.skanFirstSyncAt).flatMap(Int.init), stored > 0 {
+            firstSyncAt = stored
+        } else {
+            firstSyncAt = nowSec
+            config.storage.set(Keys.skanFirstSyncAt, String(firstSyncAt))
+        }
+        guard nowSec - firstSyncAt < Self.skanManagedWindowSec else { return }
+
+        let data: Data
+        do {
+            data = try await request(
+                path: "/v1/customers/\(encode(customerId()))/skan", method: "GET")
+        } catch {
+            diagnostic(op: "syncManagedSkan", message: "\(error)")
+            return
+        }
+        let response: SkanManagedResponse
+        do {
+            response = try decode(SkanManagedResponse.self, from: data)
+        } catch {
+            diagnostic(op: "syncManagedSkan", message: "\(error)")
+            return
+        }
+        guard response.managed else { return }
+        guard let fine = response.fine, (0...63).contains(fine),
+            let coarseRaw = response.coarse, let coarse = RevnixCoarseValue(rawValue: coarseRaw)
+        else {
+            diagnostic(op: "syncManagedSkan", message: "invalid managed skan value from server")
+            return
+        }
+        let key = "\(fine):\(coarseRaw)"
+        guard key != config.storage.get(Keys.skanLastManaged) else { return }
+        do {
+            try await updateSkan(fine, coarse, false)
+        } catch {
+            diagnostic(op: "syncManagedSkan", message: "\(error)")
+            return
+        }
+        skanRegisteredByHostUpdate = true
+        markSkanRegistered()
+        config.storage.set(Keys.skanLastManaged, key)
     }
 
     /// Fire-and-forget impression beacon (feeds funnels + view conversions).
@@ -1494,6 +1551,8 @@ public actor RevnixClient {
         static let lastDeepLink = "revnix.lastDeepLink"
         static let attribution = "revnix.attribution"
         static let lastAttribution = "revnix.lastAttribution"
+        static let skanFirstSyncAt = "revnix.skanFirstSyncAt"
+        static let skanLastManaged = "revnix.skanLastManaged"
         static let lastPushToken = "revnix.lastPushToken"
         static let lastTracking = "revnix.lastTracking"
     }

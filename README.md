@@ -320,6 +320,12 @@ sent. Values go to Apple only, never to Revnix. Opt out entirely with
 `RevnixConfig(skan: false)`: the SDK then neither registers the app nor
 forwards these calls.
 
+`registerInstall` also checks, after that registration, whether the server is
+managing this customer's conversion value, and if so applies it the same way
+`updateSkanConversionValue` would. Nothing to call for this: it happens on
+every launch until 35 days after the first check, matching Apple's last
+conversion window.
+
 Your app must also add `NSAdvertisingAttributionReportEndpoint` to its
 `Info.plist`, or Apple never delivers your copy of
 the winning postback. The value is the bare apex and identical for every

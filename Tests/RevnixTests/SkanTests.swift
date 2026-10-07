@@ -262,4 +262,97 @@ final class SkanTests: XCTestCase {
 
         XCTAssertEqual(calls.values, ["0", "30"])
     }
+
+    func testManagedSkanFromTheServerIsAppliedAfterTheArm() async throws {
+        StubProtocol.respond(
+            containing: "/skan", status: 200, body: #"{"managed":true,"fine":12,"coarse":"high"}"#)
+        let calls = Recorder()
+        let client = makeClient()
+        await client.setSkanUpdater(updater(calls))
+
+        await client.registerInstall()
+        try await waitForCalls(calls, count: 2)
+
+        XCTAssertEqual(calls.values, ["0|nil|false", "12|high|false"])
+    }
+
+    func testUnmanagedSkanAppliesNothing() async throws {
+        StubProtocol.respond(containing: "/skan", status: 200, body: #"{"managed":false}"#)
+        let calls = Recorder()
+        let client = makeClient()
+        await client.setSkanUpdater(updater(calls))
+
+        await client.registerInstall()
+        try await waitForCalls(calls, count: 1)
+        try await waitForNoFurtherSkanCalls()
+
+        XCTAssertEqual(calls.values, ["0|nil|false"])
+    }
+
+    func testTheSameManagedValueIsAppliedOnlyOnce() async throws {
+        StubProtocol.respond(
+            containing: "/skan", status: 200, body: #"{"managed":true,"fine":12,"coarse":"high"}"#)
+        let calls = Recorder()
+        let client = makeClient()
+        await client.setSkanUpdater(updater(calls))
+
+        await client.registerInstall()
+        try await waitForCalls(calls, count: 2)
+        await client.registerInstall()
+        try await waitForNoFurtherSkanCalls()
+
+        XCTAssertEqual(calls.values, ["0|nil|false", "12|high|false"])
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/skan"), 2)
+    }
+
+    func testAFailedArmLatchesViaASuccessfulManagedSyncAndDoesNotResendZero() async throws {
+        StubProtocol.respond(
+            containing: "/skan", status: 200, body: #"{"managed":true,"fine":12,"coarse":"high"}"#)
+        let calls = Recorder()
+        let client = makeClient()
+        await client.setSkanUpdater(updater(calls, failFirst: true))
+
+        await client.registerInstall()
+        try await waitForCalls(calls, count: 2)
+        XCTAssertEqual(calls.values, ["0|nil|false", "12|high|false"])
+
+        await client.registerInstall()
+        try await waitForNoFurtherSkanCalls()
+
+        XCTAssertEqual(
+            calls.values, ["0|nil|false", "12|high|false"],
+            "the second launch resent the arming zero instead of staying latched")
+    }
+
+    func testSkanSyncStopsThirtyFiveDaysAfterTheFirstSync() async throws {
+        let storage = MemoryStorage()
+        let longAgo = Int(Date().timeIntervalSince1970) - 36 * 24 * 3600
+        storage.set("revnix.skanFirstSyncAt", String(longAgo))
+        StubProtocol.respond(
+            containing: "/skan", status: 200, body: #"{"managed":true,"fine":12,"coarse":"high"}"#)
+        let calls = Recorder()
+        let client = makeClient(storage: storage)
+        await client.setSkanUpdater(updater(calls))
+
+        await client.registerInstall()
+        try await waitForCalls(calls, count: 1)
+        try await waitForNoFurtherSkanCalls()
+
+        XCTAssertEqual(calls.values, ["0|nil|false"])
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/skan"), 0)
+    }
+
+    func testSkanDisabledNeverSyncsManagedValues() async throws {
+        StubProtocol.respond(
+            containing: "/skan", status: 200, body: #"{"managed":true,"fine":12,"coarse":"high"}"#)
+        let calls = Recorder()
+        let client = makeClient(skan: false)
+        await client.setSkanUpdater(updater(calls))
+
+        await client.registerInstall()
+        try await waitForNoFurtherSkanCalls()
+
+        XCTAssertEqual(calls.count, 0)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/skan"), 0)
+    }
 }
