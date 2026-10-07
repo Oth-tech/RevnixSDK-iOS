@@ -5,6 +5,10 @@ import Foundation
 #if canImport(AdServices)
     import AdServices
 #endif
+#if canImport(DeviceCheck)
+    import DeviceCheck
+#endif
+import CryptoKit
 
 typealias SkanUpdater = @Sendable (Int, RevnixCoarseValue?, Bool) async throws -> Void
 
@@ -84,6 +88,7 @@ public actor RevnixClient {
     var tracking = RevnixTracking.system
     private var skanUpdatesInFlight = 0
     private var skanRegisteredByHostUpdate = false
+    private var integrityTask: (cid: String, task: Task<JSONValue?, Never>)?
 
     /// Forces the paywall language regardless of the device's, for a host
     /// whose in-app language picker differs from the OS locale. Only
@@ -820,6 +825,7 @@ public actor RevnixClient {
         if let v = appVersion { body["appVersion"] = .string(v) }
         if let k = config.device?.deviceKey { body["deviceKey"] = .string(k) }
         if tracking.status() == 3, let idfa = tracking.idfa() { body["idfa"] = .string(idfa) }
+        if let integrity = await integrityEvidence(customerId: cid) { body["integrity"] = integrity }
         do {
             let data = try await request(
                 path: "/v1/installs", method: "POST", body: body, headers: await deviceHeaders())
@@ -830,6 +836,70 @@ public actor RevnixClient {
             bgFailures += 1
             diagnostic(op: "registerInstall", message: "\(error)")
         }
+    }
+
+    private func integrityEvidence(customerId cid: String) async -> JSONValue? {
+        guard config.deviceIntegrity else { return nil }
+        if let cached = integrityTask, cached.cid == cid {
+            return await cached.task.value
+        }
+        let task = Task { await self.attestInstallWithTimeout(customerId: cid) }
+        integrityTask = (cid, task)
+        return await task.value
+    }
+
+    /// Bounds `attestInstallIfSupported` to 10s: DeviceCheck gives no
+    /// cancellable API, so the loser keeps running in the background and is
+    /// simply ignored rather than awaited.
+    private func attestInstallWithTimeout(customerId cid: String) async -> JSONValue? {
+        await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var resumed = false
+            @discardableResult
+            func resumeOnce(_ value: JSONValue?) -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else { return false }
+                resumed = true
+                continuation.resume(returning: value)
+                return true
+            }
+            Task {
+                resumeOnce(await self.attestInstallIfSupported(customerId: cid))
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                if resumeOnce(nil) {
+                    self.diagnostic(op: "deviceIntegrity", message: "attestation timed out")
+                }
+            }
+        }
+    }
+
+    private func attestInstallIfSupported(customerId cid: String) async -> JSONValue? {
+        #if canImport(DeviceCheck)
+            let service = DCAppAttestService.shared
+            guard service.isSupported else {
+                diagnostic(op: "deviceIntegrity", message: "App Attest unsupported")
+                return nil
+            }
+            do {
+                let keyId = try await service.generateKey()
+                let clientDataHash = Data(SHA256.hash(data: Data(cid.utf8)))
+                let attestation = try await service.attestKey(
+                    keyId, clientDataHash: clientDataHash)
+                return .object([
+                    "platform": .string("ios"),
+                    "keyId": .string(keyId),
+                    "attestation": .string(attestation.base64EncodedString()),
+                ])
+            } catch {
+                diagnostic(op: "deviceIntegrity", message: "\(error)")
+                return nil
+            }
+        #else
+            return nil
+        #endif
     }
 
     private func deliverDeferredDeepLink(from data: Data) async {
@@ -898,6 +968,7 @@ public actor RevnixClient {
                 "attributionToken": .string(token),
             ]
             if let k = config.device?.deviceKey { body["deviceKey"] = .string(k) }
+            if let integrity = await integrityEvidence(customerId: cid) { body["integrity"] = integrity }
             do {
                 let data = try await request(
                     path: "/v1/installs", method: "POST", body: body,
@@ -1255,8 +1326,9 @@ public actor RevnixClient {
         let payload = [provider, network, campaign ?? "", adGroup ?? "", creative ?? ""]
             .joined(separator: "\u{1}")
         guard config.storage.get(Keys.lastAttribution) != payload else { return }
+        let cid = customerId()
         var body: [String: JSONValue] = [
-            "customerId": .string(customerId()),
+            "customerId": .string(cid),
             "provider": .string(String(provider.prefix(100))),
             "network": .string(String(network.prefix(100))),
             "sdkVersion": .string(Self.sdkVersion),
@@ -1264,6 +1336,9 @@ public actor RevnixClient {
         if let v = campaign { body["campaign"] = .string(String(v.prefix(100))) }
         if let v = adGroup { body["adGroup"] = .string(String(v.prefix(100))) }
         if let v = creative { body["creative"] = .string(String(v.prefix(100))) }
+        if let integrity = await integrityEvidence(customerId: cid) {
+            body["integrity"] = integrity
+        }
         do {
             _ = try await request(path: "/v1/attribution", method: "POST", body: body)
             config.storage.set(Keys.lastAttribution, payload)

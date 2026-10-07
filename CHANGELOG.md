@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`RevnixConfig.deviceIntegrity`.** Opt-in Apple App Attest evidence (key
+  id + attestation), minted once per customer id per launch and attached to every
+  install-related request (`registerInstall`, the Apple Search Ads
+  attribution post, `setAttribution`), so the server can verify the install
+  came from the genuine app on a genuine Apple device. Off by default;
+  unsupported hosts (Simulator, older OS) omit it silently. Never fails or
+  skips any of those requests, though the first one on a fresh install may
+  wait up to 10s for the attestation call to Apple before giving up and
+  sending without it.
 - **Privacy manifest.** `PrivacyInfo.xcprivacy` now ships in the package
   (SwiftPM resource, CocoaPods `Revnix_Privacy` bundle). It declares User ID,
   Device ID, Purchase History, Product Interaction and Advertising Data,

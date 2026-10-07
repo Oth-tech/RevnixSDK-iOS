@@ -45,7 +45,8 @@ final class RevnixClientTests: XCTestCase {
         readYourWritesDelays: [TimeInterval] = [0.25, 0.5, 1, 2],
         onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
         device: DeviceFacts? = RevnixClientTests.fixedDevice,
-        onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil
+        onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil,
+        deviceIntegrity: Bool = false
     ) -> RevnixClient {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [StubProtocol.self]
@@ -61,7 +62,8 @@ final class RevnixClientTests: XCTestCase {
                 now: now,
                 session: URLSession(configuration: sessionConfig),
                 device: device,
-                onDeferredDeepLink: onDeferredDeepLink
+                onDeferredDeepLink: onDeferredDeepLink,
+                deviceIntegrity: deviceIntegrity
             ))
     }
 
@@ -839,6 +841,43 @@ final class RevnixClientTests: XCTestCase {
         await client.registerInstall()
         let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
         XCTAssertTrue(body.contains(#""platform":"\#(DeviceFacts.platformName)""#), body)
+    }
+
+    func testDeviceIntegrityDefaultOmitsTheField() async throws {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        let client = makeClient()
+        await client.registerInstall()
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertFalse(body.contains("integrity"), body)
+    }
+
+    func testDeviceIntegrityEnabledButUnsupportedHostStillOmitsTheField() async throws {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        let events = Recorder()
+        let client = makeClient(
+            onDiagnostic: { events.record($0.op) }, deviceIntegrity: true)
+        await client.registerInstall()
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertFalse(body.contains("integrity"), body)
+        XCTAssertTrue(events.values.contains("deviceIntegrity"), events.values.description)
+    }
+
+    func testDeviceIntegrityEnabledButUnsupportedHostLeavesTheAppleSearchAdsInstallWithoutIt()
+        async throws
+    {
+        StubProtocol.respond(containing: "/installs", status: 200, body: "{}")
+        let client = makeClient(deviceIntegrity: true)
+        await client.collectAppleSearchAdsAttribution(tokenOverride: { "tok_abc" })
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertFalse(body.contains("integrity"), body)
+    }
+
+    func testDeviceIntegrityEnabledButUnsupportedHostLeavesSetAttributionWithoutIt() async throws {
+        StubProtocol.respond(containing: "/v1/attribution", status: 200, body: "{}")
+        let client = makeClient(deviceIntegrity: true)
+        await client.setAttribution(provider: "adjust", network: "Facebook Installs")
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/attribution"))
+        XCTAssertFalse(body.contains("integrity"), body)
     }
 
     // MARK: - Reinstall device key (MS2)
