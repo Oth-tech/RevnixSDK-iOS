@@ -819,6 +819,7 @@ public actor RevnixClient {
         body["platform"] = .string(platform ?? DeviceFacts.platformName)
         if let v = appVersion { body["appVersion"] = .string(v) }
         if let k = config.device?.deviceKey { body["deviceKey"] = .string(k) }
+        if tracking.status() == 3, let idfa = tracking.idfa() { body["idfa"] = .string(idfa) }
         do {
             let data = try await request(
                 path: "/v1/installs", method: "POST", body: body, headers: await deviceHeaders())

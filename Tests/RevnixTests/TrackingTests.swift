@@ -174,4 +174,24 @@ final class TrackingTests: XCTestCase {
 
         XCTAssertEqual(StubProtocol.requestCount(containing: "/attributes"), 0)
     }
+
+    func testInstallSendsIdfaWhenAuthorized() async throws {
+        let client = makeClient()
+        await client.setTracking(fake(OSAllocatedUnfairLock(initialState: 3)))
+
+        await client.registerInstall()
+
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertTrue(body.contains(#""idfa":"AAAA-1111""#), body)
+    }
+
+    func testInstallOmitsIdfaWhenDenied() async throws {
+        let client = makeClient()
+        await client.setTracking(fake(OSAllocatedUnfairLock(initialState: 2)))
+
+        await client.registerInstall()
+
+        let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/installs"))
+        XCTAssertFalse(body.contains(#""idfa""#), body)
+    }
 }
