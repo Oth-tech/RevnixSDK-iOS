@@ -146,6 +146,8 @@ public struct RevnixConfig: Sendable {
     /// with `requestTrackingAuthorization()` alongside it, not after awaiting
     /// `registerInstall`, or the install sits out the whole timeout.
     public var attWaitTimeout: TimeInterval?
+    /// Opt-in Apple App Attest evidence on install-related requests.
+    public var deviceIntegrity: Bool
 
     public init(
         apiKey: String,
@@ -166,7 +168,8 @@ public struct RevnixConfig: Sendable {
         lifecycle: RevnixAppLifecycle = .system,
         sessionTimeout: TimeInterval = revnixDefaultSessionTimeout,
         skan: Bool = true,
-        attWaitTimeout: TimeInterval? = nil
+        attWaitTimeout: TimeInterval? = nil,
+        deviceIntegrity: Bool = false
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -187,5 +190,6 @@ public struct RevnixConfig: Sendable {
         self.sessionTimeout = sessionTimeout
         self.skan = skan
         self.attWaitTimeout = attWaitTimeout
+        self.deviceIntegrity = deviceIntegrity
     }
 }

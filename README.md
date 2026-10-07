@@ -419,7 +419,26 @@ Everything but `apiKey` and `baseURL` has a default:
 | `sessionTimeout` | `30 * 60` s | How long the app must be backgrounded for the return to count as a session. |
 | `skan` | `true` | SKAdNetwork registration once per install; `false` opts out and stops forwarding `updateSkanConversionValue`. |
 | `attWaitTimeout` | `nil` | Holds the first `registerInstall` report up to this many seconds while App Tracking Transparency is still undetermined, so the install carries the IDFA. `nil` never waits. |
+| `deviceIntegrity` | `false` | Attaches Apple App Attest evidence to install-related requests. See [Device integrity](#device-integrity). |
 | `now` / `session` | n/a | Injectable clock and `URLSession` for tests. |
+
+### Device integrity
+
+Set `deviceIntegrity: true` to attach Apple App Attest evidence (a key id
+and attestation blob) to every install-related request, so Revnix's server
+can verify the install came from the genuine app on a genuine Apple device.
+The same evidence is minted once per customer id per launch and rides `registerInstall`,
+the Apple Search Ads attribution post and `setAttribution`; the server
+verifies it once per install and keeps that verdict. Omitted silently wherever App Attest isn't
+available (Simulator, older OS). Never fails or skips any of those requests,
+though the first one on a fresh install may wait up to 10s for the
+attestation call to Apple before giving up and sending without it.
+
+Development-signed builds attest against Apple's development environment;
+TestFlight and App Store builds use production. No extra setup is needed on
+the app side. To turn on verification server-side, set your Apple Team ID
+in Revnix **Settings → App stores** and enable **Require device integrity**
+in **Settings → Fraud prevention**.
 
 ## Resilience policy
 
