@@ -1449,7 +1449,7 @@ public actor RevnixClient {
 
     // MARK: - Transport
 
-    public static let sdkVersion = "0.3.0"
+    public static let sdkVersion = "0.4.0"
 
     private func request(
         path: String, method: String, query: [URLQueryItem]? = nil,

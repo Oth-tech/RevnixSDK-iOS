@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 (2026-10-08)
+
 ### Added
 
 - **`RevnixConfig.deviceIntegrity`.** Opt-in Apple App Attest evidence (key
