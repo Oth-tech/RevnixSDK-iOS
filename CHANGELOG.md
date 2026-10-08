@@ -6,7 +6,7 @@
 
 - **Version follows the Revnix release.** The Swift SDK now ships with the
   same version as `react-native-revnix` and `revnix-capacitor`, so this
-  release jumps from 0.4.0 to 1.4.2. No API changes since 0.4.0.
+  release jumps from 0.4.0 to 1.4.1. No API changes since 0.4.0.
 
 ## 0.4.0 (2026-10-08)
 
