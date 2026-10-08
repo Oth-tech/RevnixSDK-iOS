@@ -66,6 +66,25 @@ entry_for() {
     { while (blank-- > 0) print ""; blank = 0; print }'
 }
 
+release_notes() {
+  printf '%s\n' "$1" | sed \
+    -e 's/^### Breaking$/## ⚠️ Breaking/' \
+    -e 's/^### Removed$/## 🗑️ Removed/' \
+    -e 's/^### Added$/## ✨ Added/' \
+    -e 's/^### Changed$/## 🔧 Changed/' \
+    -e 's/^### Fixed$/## 🐛 Fixed/'
+  if [ -n "$2" ] && git rev-parse -q --verify "refs/tags/v$2" >/dev/null 2>&1; then
+    printf '\n**Full Changelog**: https://github.com/Oth-tech/RevnixSDK-iOS/compare/v%s...v%s\n' "$2" "$3"
+  fi
+}
+
+previous_version() {
+  awk -v want="$1" '
+    found && /^## [0-9]/ { sub(/^## /, ""); sub(/ .*/, ""); print; exit }
+    index($0, "## " want) == 1 { found = 1 }
+  ' "$CHANGELOG"
+}
+
 # --notes-for: an earlier run already bumped and landed; just re-read its entry.
 if [ -n "$notes_for" ]; then
   [ -f "$CHANGELOG" ] || fail "no $CHANGELOG"
@@ -73,8 +92,9 @@ if [ -n "$notes_for" ]; then
   heading=$(grep -m1 "^## $notes_for\( \|$\)" "$CHANGELOG" || true)
   [ -n "$heading" ] || fail "$CHANGELOG has no \"## $notes_for\" entry"
   body=$(entry_for "${heading#\#\# }")
-  [ -n "$notes_out" ] && printf '%s\n' "$body" > "$notes_out"
-  printf '%s\n' "$body"
+  notes=$(release_notes "$body" "$(previous_version "$notes_for")" "$notes_for")
+  [ -n "$notes_out" ] && printf '%s\n' "$notes" > "$notes_out"
+  printf '%s\n' "$notes"
   exit 0
 fi
 
@@ -164,7 +184,7 @@ today=$(date -u +%Y-%m-%d)
 summary="$level bump, ${total_bullets} changelog bullet(s), lockstep=$lockstep"
 
 if [ -n "$notes_out" ]; then
-  printf '%s\n' "$body" > "$notes_out"
+  release_notes "$body" "$current" "$next" > "$notes_out"
 fi
 
 if [ -z "$dry_run" ]; then
