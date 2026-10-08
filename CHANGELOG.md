@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.4.1 (2026-10-08)
+
 ### Changed
 
 - **Version follows the Revnix release.** The Swift SDK now ships with the
@@ -109,6 +111,7 @@
   `resolve: false` and the server stores the link facts only. `start()`
   after `stop()` now resumes deep-link reporting even without a handler.
 
+## 0.3.0
 ## 0.3.0
 
 Never released. The version the podspec and `RevnixClient.sdkVersion` carried
