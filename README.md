@@ -15,23 +15,16 @@ Requires iOS 16+ / macOS 13+ / tvOS 16+ / watchOS 9+ and Swift 5.9.
 
 ## Install
 
-> Neither coordinate below resolves yet; see
-> [Distribution status](#distribution-status).
-
-**Swift Package Manager**
+Swift Package Manager. In Xcode: **File → Add Package Dependencies…**, paste
+`https://github.com/Oth-tech/RevnixSDK-iOS.git`, and pick the `Revnix`
+library. Or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "0.3.0")
+.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "1.4.1")
 ```
 
-Until the first tag is cut, pin the branch instead:
-`.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", branch: "main")`.
-
-**CocoaPods**
-
-```ruby
-pod 'Revnix', '~> 0.3'
-```
+Releases are the `vX.Y.Z` tags on this repository. CocoaPods is not
+published (its trunk is going read-only).
 
 ## Quick start
 
@@ -483,12 +476,3 @@ the full purchase → register → unlock path.
 
 - `identify` / `alias`: server-proxied by design (see above).
 - Amazon and other stores.
-
-## Distribution status
-
-**Not yet published.** The Swift Package Manager and CocoaPods coordinates
-above are the intended ones, but neither the repository nor the pod is public
-yet, so `swift package resolve` / `pod install` will not find them. Until they
-ship, apps integrate over the [REST API](https://revnix.io/docs/rest-api), the
-same `/v1` contract this SDK speaks, so migrating later does not change the
-backend integration.

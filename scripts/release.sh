@@ -10,7 +10,7 @@
 #   empty          → patch      (a lockstep bump: the note says so)
 #
 # Usage:
-#   scripts/release.sh --bump auto|major|minor|patch
+#   scripts/release.sh --bump auto|major|minor|patch [--version <x.y.z>]
 #        [--app-sha <sha>] [--changed true|false]
 #        [--notes-out <file>] [--dry-run]
 #   scripts/release.sh --notes-for <version> [--notes-out <file>]
@@ -24,7 +24,7 @@
 #
 # Unlike the npm SDKs there is no registry to publish to: for Swift Package
 # Manager the git tag *is* the release, so the workflow tags what this script
-# bumped. CocoaPods, when configured, is pushed from the same tag.
+# bumped.
 
 set -euo pipefail
 
@@ -33,6 +33,7 @@ SOURCE="Sources/Revnix/RevnixClient.swift"
 CHANGELOG="CHANGELOG.md"
 
 bump="auto"
+wanted=""
 app_sha=""
 changed=""
 notes_out=""
@@ -42,6 +43,7 @@ dry_run=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --bump) bump="$2"; shift 2 ;;
+    --version) wanted="$2"; shift 2 ;;
     --app-sha) app_sha="$2"; shift 2 ;;
     --changed) changed="$2"; shift 2 ;;
     --notes-out) notes_out="$2"; shift 2 ;;
@@ -80,6 +82,10 @@ case "$bump" in
   auto|major|minor|patch) ;;
   *) fail "--bump must be auto|major|minor|patch, got $bump" ;;
 esac
+if [ -n "$wanted" ]; then
+  echo "$wanted" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+    || fail "--version must be x.y.z, got $wanted"
+fi
 
 [ -f "$PODSPEC" ] || fail "no $PODSPEC"
 [ -f "$SOURCE" ] || fail "no $SOURCE"
@@ -127,6 +133,17 @@ case "$level" in
   minor) next="$major.$((minor + 1)).0" ;;
   patch) next="$major.$minor.$((patch + 1))" ;;
 esac
+
+if [ -n "$wanted" ]; then
+  highest=$(printf '%s\n%s\n' "$current" "$wanted" | sort -V | tail -1)
+  [ "$wanted" != "$current" ] && [ "$highest" = "$wanted" ] \
+    || fail "--version $wanted is not above $current"
+  IFS=. read -r wmajor wminor _ <<< "$wanted"
+  if [ "$wmajor" != "$major" ]; then level="major"
+  elif [ "$wminor" != "$minor" ]; then level="minor"
+  else level="patch"; fi
+  next="$wanted"
+fi
 
 # A release with nothing recorded under Unreleased is a lockstep bump: the
 # SDKs track revnix-app releases even when their own code did not move.
