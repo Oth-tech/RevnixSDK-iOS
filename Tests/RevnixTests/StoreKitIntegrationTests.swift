@@ -153,7 +153,12 @@ import XCTest
             let client = makeClient(storage: storage)
             let product = try await self.product("pro.lifetime")
 
-            _ = try await RevnixStoreKit.purchase(product, client: client)
+            do {
+                _ = try await RevnixStoreKit.purchase(product, client: client)
+                XCTFail("a queued claim must surface its retryable error")
+            } catch let err as RevnixError {
+                XCTAssertTrue(err.isRetryable)
+            }
             let queued = await client.pendingPurchaseCount()
             XCTAssertEqual(queued, 1, "a paid purchase was dropped")
 
