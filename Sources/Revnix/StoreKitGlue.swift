@@ -14,13 +14,17 @@
         public static func startObserving(client: RevnixClient) -> Task<Void, Never> {
             Task.detached {
                 for await update in Transaction.updates {
-                    await register(update, client: client, finish: true)
+                    _ = try? await register(update, client: client, finish: true)
                 }
             }
         }
 
         /// One call from tap to unlocked gate: StoreKit purchase → register
         /// with proof → wait for the ledger to reflect it (read-your-writes).
+        /// Nil when the customer cancelled or the purchase is pending. Throws
+        /// the `RevnixError` from registration: a retryable one means the
+        /// claim is queued and the transaction finished, a non-retryable one
+        /// leaves it unfinished.
         @discardableResult
         public static func purchase(
             _ product: Product, client: RevnixClient,
@@ -29,7 +33,8 @@
             let outcome = try await product.purchase(options: options)
             switch outcome {
             case .success(let verification):
-                return await register(verification, client: client, finish: true)
+                return try await register(
+                    verification, client: client, finish: true, throwOnFailure: true)
             case .userCancelled, .pending:
                 return nil
             @unknown default:
@@ -38,14 +43,19 @@
         }
 
         /// Re-register everything the device is entitled to. The server
-        /// dedupes on the shared purchaseKey, so this is always safe.
+        /// dedupes on the shared purchaseKey, so this is always safe. Counts
+        /// claims delivered or durably queued.
         @discardableResult
         public static func restore(client: RevnixClient) async -> Int {
             var registered = 0
             for await entitlement in Transaction.currentEntitlements {
-                if await register(entitlement, client: client, finish: false) != nil {
+                do {
+                    _ = try await register(
+                        entitlement, client: client, finish: false, throwOnFailure: true)
                     registered += 1
-                }
+                } catch let err as RevnixError where err.isRetryable {
+                    registered += 1
+                } catch {}
             }
             return registered
         }
@@ -53,8 +63,8 @@
         @discardableResult
         private static func register(
             _ verification: VerificationResult<Transaction>,
-            client: RevnixClient, finish: Bool
-        ) async -> RegisterPurchaseResult? {
+            client: RevnixClient, finish: Bool, throwOnFailure: Bool = false
+        ) async throws -> RegisterPurchaseResult? {
             // The SERVER is the verifier of record — forward the JWS either
             // way and let it check the chain (matches the backend's
             // StoreKit-2-only contract).
@@ -79,6 +89,11 @@
                 let result = try await client.registerPurchase(input)
                 if finish { await transaction.finish() }
                 return result
+            } catch let err as RevnixError where throwOnFailure && err.isRetryable {
+                if finish { await transaction.finish() }
+                throw err
+            } catch let err where throwOnFailure {
+                throw err
             } catch {
                 // Retryable failures are already queued by the client; the
                 // transaction stays unfinished so StoreKit redelivers it.
