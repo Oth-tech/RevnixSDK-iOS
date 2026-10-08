@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.0 (2026-10-08)
+
+Changes since 1.4.1 were not recorded here; see the commit log.
+
 ## 1.4.1 (2026-10-08)
 
 ### Changed
@@ -10,6 +14,7 @@
   1.4.1 to match `react-native-revnix` and `revnix-capacitor`, no API
   changes.
 
+## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 
 ### Added
@@ -76,6 +81,8 @@
   `onImplicitPaywall` handler; a paywall shows only when implicit placements
   and `deeplink_open` are configured. `start()` after `stop()` resumes this.
 
+## 0.3.0
+## 0.3.0
 ## 0.3.0
 ## 0.3.0
 
