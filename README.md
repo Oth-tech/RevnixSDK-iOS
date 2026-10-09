@@ -55,7 +55,7 @@ Swift Package Manager. In Xcode: **File → Add Package Dependencies…**, paste
 library. Or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "1.4.1")
+.package(url: "https://github.com/Oth-tech/RevnixSDK-iOS.git", from: "1.5.0")
 ```
 
 Releases are the `vX.Y.Z` tags on this repository. CocoaPods is not published.
