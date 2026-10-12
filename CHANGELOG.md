@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.6.0 (2026-10-12)
+
 ### Added
 
 - `flushEvents()` sends queued events now. `track` and `logPaywallEvent` are
@@ -23,6 +25,7 @@
 Changes since 1.4.1 were not recorded here; see the commit log.
 
 ## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
 
 ### Changed
 
@@ -30,6 +33,8 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   1.4.1 to match `react-native-revnix` and `revnix-capacitor`, no API
   changes.
 
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 
@@ -97,6 +102,10 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   `onImplicitPaywall` handler; a paywall shows only when implicit placements
   and `deeplink_open` are configured. `start()` after `stop()` resumes this.
 
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
 ## 0.3.0
 ## 0.3.0
 ## 0.3.0
