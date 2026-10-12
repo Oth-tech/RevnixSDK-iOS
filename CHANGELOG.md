@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- `flushEvents()` sends queued events now. `track` and `logPaywallEvent` are
+  queued on disk (up to 1000) and sent in batches: at 20 queued, 10 s after
+  the first, on background, and on the next launch. A transient failure
+  keeps them.
+- `preload(_:)` fetches placements ahead of time and warms the paywall images.
+
+### Changed
+
+- `resolvePlacement` answers from a cache under 24 h old and refreshes it in
+  the background, so a paywall opens without waiting on the network.
+- Entitlement reads with a cached snapshot time out after 3 s instead of 10 s.
+- The purchase retry queue keeps at most 100 purchases and drops ones queued
+  more than 30 days ago.
+
 ## 1.5.0 (2026-10-08)
 
 Changes since 1.4.1 were not recorded here; see the commit log.

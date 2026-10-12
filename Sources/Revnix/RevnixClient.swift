@@ -35,7 +35,19 @@ public actor RevnixClient {
     private static let rollbackToleranceMs = 5 * 60 * 1000
     private static let cacheCustomers = 4
     private static let serverReattributionWindowMs = 24 * 3600 * 1000
+    private static let eventQueueCap = 1000
+    private static let eventBatchSize = 100
+    private static let eventFlushThreshold = 20
+    private static let eventFlushDelay: TimeInterval = 10
+    private static let eventRetryHold: TimeInterval = 30
+    private static let placementFreshMs = 24 * 3600 * 1000
+    private static let cachedEntitlementsTimeout: TimeInterval = 3
+    private static let purchaseQueueCap = 100
+    private static let purchaseMaxAgeMs = 30 * 24 * 3600 * 1000
 
+    private var eventFlush: Task<Void, Never>?
+    private var eventTimer: Task<Void, Never>?
+    private var eventRetryAt: Date = .distantPast
     private var inflightEntitlements: Task<CustomerEntitlements, Error>?
     private var bgFailures = 0
     /// REV-268: the encoded X-Revnix-Device value, built on the first resolve
@@ -113,6 +125,21 @@ public actor RevnixClient {
             // construction is not kept alive by its own launch work.
             Task { [weak self] in await self?.start() }
         }
+        let leftoverEvents = config.storage.get(Keys.eventQueue) != nil
+        Task { [weak self] in await self?.startEventQueue(flush: leftoverEvents) }
+    }
+
+    private func startEventQueue(flush: Bool) {
+        subscribeLifecycle()
+        if flush { startEventFlush() }
+    }
+
+    private func subscribeLifecycle() {
+        guard lifecycleCancel == nil else { return }
+        lifecycleCancel = config.lifecycle.onStateChange { [weak self] state in
+            guard let self else { return }
+            Task { await self.appStateChanged(state) }
+        }
     }
 
     deinit {
@@ -143,10 +170,7 @@ public actor RevnixClient {
         // when offline: a customer who backgrounds the app during that window
         // and comes back an hour later is a session, and missing the
         // background transition would lose it.
-        lifecycleCancel = config.lifecycle.onStateChange { [weak self] state in
-            guard let self else { return }
-            Task { await self.appStateChanged(state) }
-        }
+        subscribeLifecycle()
 
         // `customerId()` is what sets mintedThisLaunch, so it runs first.
         _ = customerId()
@@ -172,15 +196,14 @@ public actor RevnixClient {
         launchBatch = nil
     }
 
-    /// Stop watching. A replaced client would otherwise keep a foreground
-    /// observer alive and mint a session on every return alongside its
-    /// successor. Anything mid-flight (the launch batch, a config read) is
-    /// told to hand nothing over.
+    /// Stop firing implicit moments. A replaced client would otherwise mint a
+    /// session on every return alongside its successor. Anything mid-flight
+    /// (the launch batch, a config read) is told to hand nothing over. The
+    /// lifecycle observer stays until the client is released: it also
+    /// flushes queued events when the app goes to the background.
     public func stop() {
         implicitStopped = true
         implicitStarted = false
-        lifecycleCancel?()
-        lifecycleCancel = nil
         implicitConfigTask?.cancel()
         implicitConfigTask = nil
     }
@@ -319,7 +342,8 @@ public actor RevnixClient {
     }
 
     private func appStateChanged(_ state: RevnixAppState) async {
-        guard !implicitStopped else { return }
+        if state == .background { startEventFlush() }
+        guard implicitStarted, !implicitStopped else { return }
         switch state {
         case .background:
             // First report wins: a platform that repeats "background" must not
@@ -551,10 +575,10 @@ public actor RevnixClient {
     /// Network-only read — no TTL shortcut, no cache fallback. Throws on any
     /// failure. The read-your-writes poll needs a genuinely fresh cursor.
     private func fetchFreshEntitlements(
-        cid: String, nowMs: Int
+        cid: String, nowMs: Int, timeout: TimeInterval? = nil
     ) async throws -> CustomerEntitlements {
         let data = try await request(
-            path: "/v1/customers/\(encode(cid))/entitlements", method: "GET")
+            path: "/v1/customers/\(encode(cid))/entitlements", method: "GET", timeout: timeout)
         var snapshot = try decode(CustomerEntitlements.self, from: data)
         snapshot.stale = false
         snapshot.fetchedAt = nowMs
@@ -565,8 +589,9 @@ public actor RevnixClient {
     private func fetchEntitlements(
         cid: String, nowMs: Int, rolledBack: Bool
     ) async throws -> CustomerEntitlements {
+        let timeout = cacheEntry(for: cid) == nil ? nil : Self.cachedEntitlementsTimeout
         do {
-            return try await fetchFreshEntitlements(cid: cid, nowMs: nowMs)
+            return try await fetchFreshEntitlements(cid: cid, nowMs: nowMs, timeout: timeout)
         } catch let err as RevnixError where err.isRetryable {
             // Transient — the cache answers, under the offline policy.
             guard let entry = cacheEntry(for: cid) else { throw err }
@@ -678,6 +703,7 @@ public actor RevnixClient {
                 config.storage.set(Keys.customerId, result.customerId)
             }
             removeQueued(key: queueKey(input))
+            config.storage.set(Keys.placementsInvalidatedAt, String(nowMs()))
             return result
         } catch let err as RevnixError where err.isRetryable {
             enqueue(input)
@@ -690,12 +716,24 @@ public actor RevnixClient {
     @discardableResult
     public func retryPendingPurchases() async -> Int {
         let cid = customerId()
+        let now = nowMs()
+        var items = queuedItems()
+        if items.contains(where: { $0.queuedAt == nil }) {
+            for i in items.indices where items[i].queuedAt == nil { items[i].queuedAt = now }
+            persistQueue(items)
+        }
         var delivered = 0
-        for item in queuedItems() {
+        for item in items {
+            if let queuedAt = item.queuedAt, now - queuedAt > Self.purchaseMaxAgeMs {
+                removeQueued(key: item.key)
+                diagnostic(op: "retryPendingPurchases", message: "expired \(item.key)")
+                continue
+            }
             do {
                 _ = try await postPurchase(item.input, customerId: cid)
                 removeQueued(key: item.key)
                 delivered += 1
+                config.storage.set(Keys.placementsInvalidatedAt, String(nowMs()))
             } catch let err as RevnixError where !err.isRetryable {
                 // The server refused on purpose — retrying forever is noise.
                 removeQueued(key: item.key)
@@ -732,33 +770,119 @@ public actor RevnixClient {
 
     // MARK: - Placements & telemetry
 
+    /// Served from a cache under 24 h old when there is one, refreshed in the
+    /// background; otherwise network first, with a cache of any age as the
+    /// fallback on a transient failure. A deliberate rejection seen by the
+    /// background refresh drops the cache, so the next resolve throws it.
     public func resolvePlacement(_ key: String) async throws -> PlacementResolution {
-        do {
-            // REV-219: the customer id lets the server pin a sticky experiment
-            // variant; older servers simply ignore the parameter.
-            // REV-268: the device facts ride along so targeting rules see THIS
-            // device on THIS request, and the server stores them as
-            // device.* attributes. Older servers ignore the header.
-            let data = try await request(
-                path: "/v1/placements/\(encode(key))/offering", method: "GET",
-                query: [URLQueryItem(name: "customer", value: customerId())],
-                headers: await deviceHeaders())
-            let resolution = try decode(PlacementResolution.self, from: data)
-            // Cache the wire bytes themselves (as revnix-kotlin does), not a
-            // re-encode: offline then sees exactly the document the server
-            // sent, including whatever this SDK version does not type.
-            if let wire = String(data: data, encoding: .utf8) {
-                config.storage.set(Keys.placement(key), wire)
-            }
-            return resolution
-        } catch let err as RevnixError where err.isRetryable {
-            guard let cached = config.storage.get(Keys.placement(key)),
-                let data = cached.data(using: .utf8),
-                let resolution = try? JSONDecoder().decode(
-                    PlacementResolution.self, from: data)
-            else { throw err }
-            return resolution
+        if let stamp = placementStamp(key), stamp.customerId == customerId(),
+            stamp.fetchedAt > placementsInvalidatedAt(),
+            (0...Self.placementFreshMs).contains(nowMs() - stamp.fetchedAt),
+            let cached = cachedPlacement(key)
+        {
+            Task { [weak self] in await self?.refreshPlacement(key) }
+            return cached
         }
+        do {
+            return try await fetchPlacement(key)
+        } catch let err as RevnixError where err.isRetryable {
+            guard let cached = cachedPlacement(key) else { throw err }
+            return cached
+        }
+    }
+
+    /// Fetch these placements now so the next `resolvePlacement` answers from
+    /// the cache, and warm `URLCache.shared` with their paywall images. Never
+    /// throws; failures report to `onDiagnostic`.
+    public func preload(_ placementKeys: [String]) async {
+        let resolutions = await withTaskGroup(of: PlacementResolution?.self) { group in
+            for key in placementKeys { group.addTask { await self.refreshPlacement(key) } }
+            var fetched: [PlacementResolution] = []
+            for await resolution in group { if let resolution { fetched.append(resolution) } }
+            return fetched
+        }
+        let images = Set(resolutions.flatMap { Self.paywallImageURLs($0.paywallJSON) })
+        await withTaskGroup(of: Void.self) { group in
+            for url in images { group.addTask { _ = try? await URLSession.shared.data(from: url) } }
+        }
+    }
+
+    static func paywallImageURLs(_ value: JSONValue?) -> [URL] {
+        switch value {
+        case .array(let items)?:
+            return items.flatMap { paywallImageURLs($0) }
+        case .object(let o)?:
+            var found: [String] = []
+            if case .string(let s)? = o["heroImageUrl"] { found.append(s) }
+            if o["type"] == .string("image"), case .string(let s)? = o["url"] { found.append(s) }
+            if case .object(let background)? = o["background"],
+                case .object(let image)? = background["image"],
+                case .string(let s)? = image["url"]
+            {
+                found.append(s)
+            }
+            return found.compactMap(URL.init(string:)) + o.values.flatMap { paywallImageURLs($0) }
+        default:
+            return []
+        }
+    }
+
+    private func fetchPlacement(_ key: String) async throws -> PlacementResolution {
+        let cid = customerId()
+        let fetchedAt = nowMs()
+        // REV-219: the customer id lets the server pin a sticky experiment
+        // variant; older servers simply ignore the parameter.
+        // REV-268: the device facts ride along so targeting rules see THIS
+        // device on THIS request, and the server stores them as
+        // device.* attributes. Older servers ignore the header.
+        let data = try await request(
+            path: "/v1/placements/\(encode(key))/offering", method: "GET",
+            query: [URLQueryItem(name: "customer", value: cid)],
+            headers: await deviceHeaders())
+        let resolution = try decode(PlacementResolution.self, from: data)
+        if let wire = String(data: data, encoding: .utf8) {
+            config.storage.set(Keys.placement(key), wire)
+            if let stamp = try? JSONEncoder().encode(
+                PlacementStamp(customerId: cid, fetchedAt: fetchedAt))
+            {
+                config.storage.set(Keys.placementStamp(key), String(decoding: stamp, as: UTF8.self))
+            }
+        }
+        return resolution
+    }
+
+    @discardableResult
+    private func refreshPlacement(_ key: String) async -> PlacementResolution? {
+        do {
+            return try await fetchPlacement(key)
+        } catch {
+            bgFailures += 1
+            if let err = error as? RevnixError, !err.isRetryable {
+                config.storage.remove(Keys.placement(key))
+                config.storage.remove(Keys.placementStamp(key))
+            }
+            diagnostic(op: "resolvePlacement", message: "\(error)")
+            return nil
+        }
+    }
+
+    private struct PlacementStamp: Codable {
+        let customerId: String
+        let fetchedAt: Int
+    }
+
+    private func placementStamp(_ key: String) -> PlacementStamp? {
+        config.storage.get(Keys.placementStamp(key))
+            .flatMap { try? JSONDecoder().decode(PlacementStamp.self, from: Data($0.utf8)) }
+    }
+
+    private func placementsInvalidatedAt() -> Int {
+        config.storage.get(Keys.placementsInvalidatedAt).flatMap(Int.init) ?? 0
+    }
+
+    private func cachedPlacement(_ key: String) -> PlacementResolution? {
+        config.storage.get(Keys.placement(key))
+            .flatMap { try? JSONDecoder().decode(PlacementResolution.self, from: Data($0.utf8)) }
     }
 
     /// REV-268: assemble the device facts once. `installedAt` is the first
@@ -1225,9 +1349,10 @@ public actor RevnixClient {
             "customerId": .string(customerId()),
             "viewId": .string(viewId),
             "event": .string(event.rawValue),
+            "eventId": .string(eventId ?? viewId),
+            "occurredAt": .number(Double(nowMs())),
             "sdkVersion": .string(Self.sdkVersion),
         ]
-        if let v = eventId { body["eventId"] = .string(v) }
         if let v = placementKey { body["placementKey"] = .string(v) }
         if let v = paywallId { body["paywallId"] = .string(v) }
         if let v = productId { body["productId"] = .string(v) }
@@ -1235,12 +1360,7 @@ public actor RevnixClient {
         // The server bounds `message` at 1024; trimming here keeps a long
         // localized store error from turning the whole report into a 400.
         if let v = message { body["message"] = .string(String(v.prefix(1024))) }
-        do {
-            _ = try await request(path: "/v1/paywalls/events", method: "POST", body: body)
-        } catch {
-            bgFailures += 1
-            diagnostic(op: "logPaywallEvent", message: "\(error)")
-        }
+        enqueueEvent(QueuedEvent(path: "/v1/paywalls/events", body: body))
         // REV-272: backing out of the store sheet is the `transaction_abandon`
         // moment. Reuses the paywall.purchase_abandoned just reported.
         if event == .purchaseAbandoned {
@@ -1305,12 +1425,113 @@ public actor RevnixClient {
             "occurredAt": .number(Double(nowMs())),
         ]
         if let properties { body["properties"] = .object(properties) }
-        do {
-            _ = try await request(path: "/v1/events", method: "POST", body: body)
-        } catch {
-            bgFailures += 1
-            diagnostic(op: "track", message: "\(error)")
+        enqueueEvent(QueuedEvent(path: "/v1/events", body: body))
+    }
+
+    /// Send every queued `track` and paywall interaction event now. Events
+    /// are otherwise sent in batches: at 20 queued, 10 s after the first,
+    /// when the app goes to the background, and on the next launch. Never
+    /// throws; a transient failure keeps the events for the next flush.
+    public func flushEvents() async {
+        if let running = eventFlush { await running.value }
+        startEventFlush()
+        await eventFlush?.value
+    }
+
+    private struct QueuedEvent: Codable, Equatable {
+        let path: String
+        let body: [String: JSONValue]
+    }
+
+    private struct BatchResponse: Decodable {
+        let results: [Item]
+        struct Item: Decodable {
+            let status: Int
+            let error: String?
         }
+    }
+
+    // ponytail: the whole queue is re-encoded per event; keep it in memory if 1000-item offline queues show up in profiles.
+    private func queuedEvents() -> [QueuedEvent] {
+        config.storage.get(Keys.eventQueue)
+            .flatMap { try? JSONDecoder().decode([QueuedEvent].self, from: Data($0.utf8)) } ?? []
+    }
+
+    private func persistEvents(_ events: [QueuedEvent]) {
+        if events.isEmpty {
+            config.storage.remove(Keys.eventQueue)
+        } else if let data = try? JSONEncoder().encode(events) {
+            config.storage.set(Keys.eventQueue, String(decoding: data, as: UTF8.self))
+        }
+    }
+
+    private func enqueueEvent(_ event: QueuedEvent) {
+        var events = queuedEvents()
+        if events.count >= Self.eventQueueCap {
+            events.removeFirst(events.count - Self.eventQueueCap + 1)
+            diagnostic(op: "eventQueue", message: "queue full, dropped the oldest event")
+        }
+        events.append(event)
+        persistEvents(events)
+        if events.count >= Self.eventFlushThreshold {
+            startEventFlush()
+        } else {
+            armEventTimer(after: Self.eventFlushDelay)
+        }
+    }
+
+    private func armEventTimer(after seconds: TimeInterval) {
+        guard eventTimer == nil else { return }
+        eventTimer = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            await self?.eventTimerFired()
+        }
+    }
+
+    private func eventTimerFired() {
+        eventTimer = nil
+        startEventFlush()
+    }
+
+    private func startEventFlush() {
+        guard eventFlush == nil else { return }
+        let hold = eventRetryAt.timeIntervalSince(config.now())
+        guard hold <= 0 else { return armEventTimer(after: hold) }
+        eventFlush = Task { [weak self] in await self?.runEventFlush() }
+    }
+
+    private func runEventFlush() async {
+        defer { eventFlush = nil }
+        for (path, events) in Dictionary(grouping: queuedEvents(), by: \.path) {
+            for start in stride(from: 0, to: events.count, by: Self.eventBatchSize) {
+                let chunk = Array(events[start..<min(start + Self.eventBatchSize, events.count)])
+                do {
+                    let data = try await request(
+                        path: path, method: "POST",
+                        body: ["events": .array(chunk.map { .object($0.body) })])
+                    let results = try decode(BatchResponse.self, from: data).results
+                    for (event, result) in zip(chunk, results) where result.status >= 400 {
+                        diagnostic(
+                            op: "eventQueue",
+                            message: "dropped \(path) event \(event.body["eventId"] ?? .null): \(result.status) \(result.error ?? "")")
+                    }
+                    removeEvents(chunk)
+                } catch let err as RevnixError where err.isRetryable {
+                    bgFailures += 1
+                    eventRetryAt = config.now().addingTimeInterval(Self.eventRetryHold)
+                    diagnostic(op: "eventQueue", message: "kept \(chunk.count) events: \(err)")
+                    return
+                } catch {
+                    bgFailures += 1
+                    removeEvents(chunk)
+                    diagnostic(op: "eventQueue", message: "dropped \(chunk.count) events: \(error)")
+                }
+            }
+        }
+    }
+
+    private func removeEvents(_ sent: [QueuedEvent]) {
+        persistEvents(queuedEvents().filter { !sent.contains($0) })
     }
 
     /// PT11: forward an MMP's attribution callback (Adjust, AppsFlyer, …) so
@@ -1445,6 +1666,7 @@ public actor RevnixClient {
             path: "/v1/customers/\(encode(customerId()))/attributes",
             method: "POST",
             body: ["attributes": .object(attributes)])
+        config.storage.set(Keys.placementsInvalidatedAt, String(nowMs()))
     }
 
     // MARK: - Transport
@@ -1454,7 +1676,8 @@ public actor RevnixClient {
     private func request(
         path: String, method: String, query: [URLQueryItem]? = nil,
         body: [String: JSONValue]? = nil,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        timeout: TimeInterval? = nil
     ) async throws -> Data {
         var url = config.baseURL.appendingPathComponent(path)
         if let query,
@@ -1471,7 +1694,7 @@ public actor RevnixClient {
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = config.timeout
+        req.timeoutInterval = timeout ?? config.timeout
         req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("revnix-swift/\(Self.sdkVersion)", forHTTPHeaderField: "X-Revnix-SDK")
         for (name, value) in headers { req.setValue(value, forHTTPHeaderField: name) }
@@ -1536,6 +1759,7 @@ public actor RevnixClient {
         let expiresAt: Int?
         let signedTransactionInfo: String?
         let rawPayload: JSONValue?
+        var queuedAt: Int?
 
         var input: RegisterPurchaseInput {
             RegisterPurchaseInput(
@@ -1557,6 +1781,9 @@ public actor RevnixClient {
         static let lastBackgroundAt = "revnix.lastBackgroundAt"
         static func cache(_ cid: String) -> String { "revnix.ent.\(cid)" }
         static func placement(_ key: String) -> String { "revnix.placement.\(key)" }
+        static func placementStamp(_ key: String) -> String { "revnix.placementAt.\(key)" }
+        static let placementsInvalidatedAt = "revnix.placementsInvalidatedAt"
+        static let eventQueue = "revnix.eventQueue"
         static func installReported(_ cid: String) -> String {
             "revnix.installReported.\(cid)"
         }
@@ -1638,13 +1865,17 @@ public actor RevnixClient {
         var items = queuedItems()
         let key = queueKey(input)
         guard !items.contains(where: { $0.key == key }) else { return }
+        while items.count >= Self.purchaseQueueCap {
+            let dropped = items.removeFirst()
+            diagnostic(op: "registerPurchase", message: "queue full, dropped \(dropped.key)")
+        }
         items.append(
             QueuedPurchase(
                 key: key, source: input.source.rawValue, token: input.token,
                 productId: input.productId, transactionId: input.transactionId,
                 occurredAt: input.occurredAt, expiresAt: input.expiresAt,
                 signedTransactionInfo: input.signedTransactionInfo,
-                rawPayload: input.rawPayload))
+                rawPayload: input.rawPayload, queuedAt: nowMs()))
         persistQueue(items)
     }
 
