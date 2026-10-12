@@ -167,6 +167,7 @@ final class PreviewTests: XCTestCase {
         await client.logPaywallEvent(
             .purchaseAbandoned, viewId: "v1", placementKey: revnixPreviewPlacementKey,
             paywallId: "pw_preview")
+        await client.flushEvents()
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/paywalls/events"), 0)
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/placements/triggered"), 0)
     }

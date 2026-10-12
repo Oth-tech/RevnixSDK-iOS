@@ -82,6 +82,13 @@ final class RevnixClientTests: XCTestCase {
         return try JSONDecoder().decode([String: JSONValue].self, from: data)
     }
 
+    func waitUntil(_ condition: @escaping () -> Bool) async throws {
+        for _ in 0..<200 where !condition() {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(condition(), "condition never became true")
+    }
+
     // MARK: - Request timeout (spec: "C7 request timeout")
 
     func testHungRequestTimesOutRatherThanHanging() async throws {
@@ -360,8 +367,11 @@ final class RevnixClientTests: XCTestCase {
         StubProtocol.respond(
             containing: "/placements", status: 404,
             body: #"{"error":"unknown placement"}"#)
-        let client = makeClient()
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
         _ = try await client.resolvePlacement("main")  // cached
+        _ = try await client.resolvePlacement("main")
+        try await waitUntil { storage.get("revnix.placement.main") == nil }
         do {
             _ = try await client.resolvePlacement("main")
             XCTFail("expected RevnixError.notFound")
@@ -539,7 +549,7 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertNil(paywall.config.footer)
 
         // Fixture without a `paywall` key at all.
-        let bare = try await client.resolvePlacement("main")
+        let bare = try await makeClient().resolvePlacement("main")
         XCTAssertNil(bare.paywall)
     }
 
@@ -596,7 +606,7 @@ final class RevnixClientTests: XCTestCase {
         // A later session on the same storage: same install date, no longer
         // the first open.
         let later = makeClient(
-            now: { fixedNow.addingTimeInterval(86_400) }, storage: storage)
+            now: { fixedNow.addingTimeInterval(2 * 86_400) }, storage: storage)
         _ = try await later.resolvePlacement("main")
         let second = try Self.decodeDeviceHeader(
             try XCTUnwrap(
@@ -735,6 +745,308 @@ final class RevnixClientTests: XCTestCase {
         let absentCase = try await client.resolvePlacement("main")
         XCTAssertNil(absentCase.paywallJSON)
         XCTAssertNil(absentCase.experimentJSON)
+    }
+
+    static func batchResults(_ statuses: [Int]) -> String {
+        #"{"results":["# + statuses.map { #"{"status":\#($0)}"# }.joined(separator: ",") + "]}"
+    }
+
+    static func batchEvents(_ body: String) throws -> [[String: JSONValue]] {
+        try XCTUnwrap(
+            JSONDecoder().decode([String: [[String: JSONValue]]].self, from: Data(body.utf8))["events"])
+    }
+
+    static func queuedEvents(_ storage: MemoryStorage) throws -> [[String: JSONValue]] {
+        guard let raw = storage.get("revnix.eventQueue") else { return [] }
+        return try JSONDecoder().decode([[String: JSONValue]].self, from: Data(raw.utf8))
+    }
+
+    func testThreeTracksFlushAsOneBatchPost() async throws {
+        StubProtocol.respond(
+            containing: "/v1/events", status: 200, body: Self.batchResults([201, 201, 201]))
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        for name in ["a", "b", "c"] { await client.track(name) }
+        XCTAssertEqual(try Self.queuedEvents(storage).count, 3)
+
+        await client.flushEvents()
+
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1)
+        let events = try Self.batchEvents(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/events")))
+        XCTAssertEqual(events.map { $0["event"] }, [.string("a"), .string("b"), .string("c")])
+        XCTAssertNil(storage.get("revnix.eventQueue"))
+    }
+
+    func testPaywallEventsQueueWithAnEventIdAndFlushToTheirOwnRoute() async throws {
+        StubProtocol.respond(
+            containing: "/v1/paywalls/events", status: 200, body: Self.batchResults([201]))
+        let client = makeClient()
+        await client.logPaywallEvent(.restore, viewId: "view_1", placementKey: "main")
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/paywalls/events"), 0)
+
+        await client.flushEvents()
+
+        let events = try Self.batchEvents(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/events")))
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?["event"], .string("restore"))
+        XCTAssertEqual(events.first?["eventId"], .string("view_1"))
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 0)
+    }
+
+    func testRetryableFailureKeepsEventsAndTheNextFlushAfterTheHoldDelivers() async throws {
+        StubProtocol.respond(containing: "/v1/events", status: 503, body: #"{"error":"down"}"#)
+        let clock = Clock(start: Date())
+        let storage = MemoryStorage()
+        let client = makeClient(now: { clock.now() }, storage: storage)
+        await client.track("a")
+        await client.track("b")
+
+        await client.flushEvents()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1)
+        XCTAssertEqual(try Self.queuedEvents(storage).count, 2)
+
+        StubProtocol.respond(
+            containing: "/v1/events", status: 200, body: Self.batchResults([201, 201]))
+        await client.flushEvents()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1, "inside the hold")
+
+        clock.advance(by: 31)
+        await client.flushEvents()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 2)
+        let events = try Self.batchEvents(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/events")))
+        XCTAssertEqual(events.map { $0["event"] }, [.string("a"), .string("b")])
+        XCTAssertNil(storage.get("revnix.eventQueue"))
+    }
+
+    func testANonJSONSuccessKeepsTheEvents() async throws {
+        StubProtocol.respond(containing: "/v1/events", status: 200, body: "<html>login</html>")
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        await client.track("a")
+
+        await client.flushEvents()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1)
+        XCTAssertEqual(try Self.queuedEvents(storage).count, 1)
+    }
+
+    func testAFlushTriggeredInsideTheHoldRunsWhenTheHoldEnds() async throws {
+        StubProtocol.respond(containing: "/v1/events", status: 503, body: #"{"error":"down"}"#)
+        let clock = Clock(start: Date())
+        let storage = MemoryStorage()
+        storage.set(
+            "revnix.eventQueue",
+            #"[{"path":"/v1/events","body":{"eventId":"e0","event":"seed"}}]"#)
+        let diagnostics = Recorder()
+        let client = makeClient(
+            now: { clock.now() }, storage: storage,
+            onDiagnostic: { diagnostics.record($0.message) })
+        try await waitUntil { diagnostics.values.contains { $0.hasPrefix("kept") } }
+
+        StubProtocol.respond(
+            containing: "/v1/events", status: 200, body: Self.batchResults([201]))
+        clock.advance(by: 29.7)
+        await client.flushEvents()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1, "inside the hold")
+        clock.advance(by: 1)
+
+        try await waitUntil { storage.get("revnix.eventQueue") == nil }
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 2)
+    }
+
+    func testARejectedItemIsDroppedWithADiagnosticAndTheRestAreRemoved() async throws {
+        StubProtocol.respond(
+            containing: "/v1/events", status: 200,
+            body: #"{"results":[{"status":201},{"status":400,"error":"bad properties"},{"status":200}]}"#)
+        let diagnostics = Recorder()
+        let storage = MemoryStorage()
+        let client = makeClient(
+            storage: storage, onDiagnostic: { diagnostics.record("\($0.op): \($0.message)") })
+        for name in ["a", "b", "c"] { await client.track(name, eventId: "id_\(name)") }
+
+        await client.flushEvents()
+
+        XCTAssertNil(storage.get("revnix.eventQueue"))
+        let dropped = diagnostics.values.filter { $0.hasPrefix("eventQueue:") }
+        XCTAssertEqual(dropped.count, 1, "\(dropped)")
+        XCTAssertTrue(dropped.first?.contains("id_b") ?? false, "\(dropped)")
+        XCTAssertTrue(dropped.first?.contains("400 bad properties") ?? false, "\(dropped)")
+    }
+
+    func testAFullQueueDropsTheOldestEvent() async throws {
+        StubProtocol.failWithConnectionError(containing: "/v1/events")
+        let storage = MemoryStorage()
+        let seeded = (0..<1000).map {
+            #"{"path":"/v1/events","body":{"eventId":"e\#($0)","event":"seed"}}"#
+        }
+        storage.set("revnix.eventQueue", "[" + seeded.joined(separator: ",") + "]")
+        let diagnostics = Recorder()
+        let client = makeClient(
+            storage: storage, onDiagnostic: { diagnostics.record("\($0.op): \($0.message)") })
+
+        await client.track("newest")
+
+        let queued = try Self.queuedEvents(storage)
+        XCTAssertEqual(queued.count, 1000)
+        guard case .object(let first)? = queued.first?["body"],
+            case .object(let last)? = queued.last?["body"]
+        else { return XCTFail("queue items should carry a body") }
+        XCTAssertEqual(first["eventId"], .string("e1"))
+        XCTAssertEqual(last["event"], .string("newest"))
+        XCTAssertTrue(diagnostics.values.contains { $0.contains("queue full") })
+    }
+
+    static let placementBodyRevision2 = placementBody.replacingOccurrences(
+        of: #""revision":1"#, with: #""revision":2"#)
+
+    func testFreshCachedPlacementAnswersWithoutTheNetworkAndRefreshesInTheBackground()
+        async throws
+    {
+        StubProtocol.respond(containing: "/placements", status: 200, body: Self.placementBody)
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage, timeout: 5)
+        _ = try await client.resolvePlacement("main")
+
+        StubProtocol.hang(containing: "/placements")
+        let started = Date()
+        let cached = try await client.resolvePlacement("main")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertEqual(cached.revision, 1)
+
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.placementBodyRevision2)
+        let stillCached = try await client.resolvePlacement("main")
+        XCTAssertEqual(stillCached.revision, 1)
+        try await waitUntil {
+            storage.get("revnix.placement.main")?.contains(#""revision":2"#) ?? false
+        }
+        let refreshed = try await client.resolvePlacement("main")
+        XCTAssertEqual(refreshed.revision, 2)
+    }
+
+    func testARefreshInFlightWhenAttributesChangeIsNotServedCacheFirst() async throws {
+        StubProtocol.respond(containing: "/placements", status: 200, body: Self.placementBody)
+        StubProtocol.respond(containing: "/attributes", status: 200, body: "{}")
+        let clock = Clock(start: Date())
+        let storage = MemoryStorage()
+        let client = makeClient(now: { clock.now() }, storage: storage)
+        _ = try await client.resolvePlacement("main")
+
+        clock.advance(by: 1)
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.placementBodyRevision2, delay: 0.3)
+        _ = try await client.resolvePlacement("main")
+        clock.advance(by: 1)
+        try await client.setAttributes(["plan": .string("pro")])
+        clock.advance(by: 1)
+        try await waitUntil {
+            storage.get("revnix.placement.main")?.contains(#""revision":2"#) ?? false
+        }
+
+        let revision3 = Self.placementBody.replacingOccurrences(
+            of: #""revision":1"#, with: #""revision":3"#)
+        StubProtocol.respond(containing: "/placements", status: 200, body: revision3)
+        let resolution = try await client.resolvePlacement("main")
+        XCTAssertEqual(resolution.revision, 3)
+    }
+
+    func testAStaleCachedPlacementGoesToTheNetworkFirst() async throws {
+        StubProtocol.respondOnce(containing: "/placements", status: 200, body: Self.placementBody)
+        StubProtocol.respond(
+            containing: "/placements", status: 200, body: Self.placementBodyRevision2)
+        let clock = Clock(start: Date())
+        let client = makeClient(now: { clock.now() })
+        _ = try await client.resolvePlacement("main")
+
+        clock.advance(by: 25 * 3600)
+        let resolution = try await client.resolvePlacement("main")
+        XCTAssertEqual(resolution.revision, 2)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/placements"), 2)
+    }
+
+    func testPreloadFillsTheCacheSoTheNextResolveSkipsTheNetwork() async throws {
+        StubProtocol.respond(containing: "/placements", status: 200, body: Self.placementBody)
+        let client = makeClient(timeout: 5)
+        await client.preload(["main", "other"])
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/placements"), 2)
+
+        StubProtocol.hang(containing: "/placements")
+        let started = Date()
+        let resolution = try await client.resolvePlacement("main")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertEqual(resolution.offering.offeringId, "off_1")
+    }
+
+    func testPaywallImageURLsCollectsOnlyTheFieldsTheRenderersLoad() throws {
+        let paywall = try JSONDecoder().decode(
+            JSONValue.self,
+            from: Data(
+                """
+                {"config":{"heroImageUrl":"https://cdn.test/hero.png","blocks":{"background":{"color":"#000","image":{"url":"https://cdn.test/bg.png"}},"blocks":[{"type":"image","url":"https://cdn.test/block.png"},{"type":"button","url":"https://cdn.test/not-an-image"},{"type":"stack","children":[{"type":"image","url":"https://cdn.test/nested.png"}]}]}}}
+                """.utf8))
+        XCTAssertEqual(
+            Set(RevnixClient.paywallImageURLs(paywall).map(\.absoluteString)),
+            [
+                "https://cdn.test/hero.png", "https://cdn.test/bg.png",
+                "https://cdn.test/block.png", "https://cdn.test/nested.png",
+            ])
+    }
+
+    func testPurchaseQueueKeepsTheNewest100() async throws {
+        StubProtocol.failWithConnectionError(containing: "/purchases")
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        for i in 0...100 {
+            _ = try? await client.registerPurchase(
+                RegisterPurchaseInput(
+                    source: .apple, token: "t\(i)", productId: "pro.monthly",
+                    transactionId: "x\(i)"))
+        }
+        let count = await client.pendingPurchaseCount()
+        XCTAssertEqual(count, 100)
+        let raw = try XCTUnwrap(storage.get("revnix.pendingPurchases"))
+        XCTAssertFalse(raw.contains("apple:t0:x0"))
+        XCTAssertTrue(raw.contains("apple:t100:x100"))
+    }
+
+    func testQueuedPurchasesOlderThan30DaysAreDroppedAndUnstampedOnesCountAsNew() async throws {
+        StubProtocol.failWithConnectionError(containing: "/purchases")
+        let clock = Clock(start: Date())
+        let nowMs = Int(clock.now().timeIntervalSince1970 * 1000)
+        let storage = MemoryStorage()
+        storage.set(
+            "revnix.pendingPurchases",
+            """
+            [{"key":"apple:old:1","source":"apple","token":"old","productId":"p","transactionId":"1","queuedAt":\(nowMs - 31 * Self.dayMs)},\
+            {"key":"apple:recent:2","source":"apple","token":"recent","productId":"p","transactionId":"2","queuedAt":\(nowMs - Self.dayMs)},\
+            {"key":"apple:legacy:3","source":"apple","token":"legacy","productId":"p","transactionId":"3"}]
+            """)
+        let client = makeClient(now: { clock.now() }, storage: storage)
+
+        let delivered = await client.retryPendingPurchases()
+        XCTAssertEqual(delivered, 0)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/purchases"), 2)
+        let remaining = await client.pendingPurchaseCount()
+        XCTAssertEqual(remaining, 2)
+        let raw = try XCTUnwrap(storage.get("revnix.pendingPurchases"))
+        XCTAssertFalse(raw.contains("apple:old:1"))
+        XCTAssertTrue(raw.contains(#""queuedAt":\#(nowMs)"#), raw)
+
+        clock.advance(by: 31 * 24 * 3600)
+        _ = await client.retryPendingPurchases()
+        let afterExpiry = await client.pendingPurchaseCount()
+        XCTAssertEqual(afterExpiry, 0)
+    }
+
+    func testEntitlementsWithACachedSnapshotUseTheShortTimeout() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        XCTAssertEqual(StubProtocol.lastTimeout(containing: "/entitlements"), 10)
+        _ = try await client.entitlements()
+        XCTAssertEqual(StubProtocol.lastTimeout(containing: "/entitlements"), 3)
     }
 
     // MARK: - Diagnostics (spec: "REV-200 diagnostics")
@@ -1167,11 +1479,14 @@ final class RevnixClientTests: XCTestCase {
         StubProtocol.respond(containing: "/v1/events", status: 200, body: "{}")
         let client = makeClient()
         await client.track("level_up", properties: ["level": .number(5), "premium": .bool(true)])
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 0)
+        await client.flushEvents()
         let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/v1/events"))
         XCTAssertEqual(path, "/v1/events")
         let method = try XCTUnwrap(StubProtocol.lastMethod(containing: "/v1/events"))
         XCTAssertEqual(method, "POST")
         let body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/events"))
+        XCTAssertTrue(body.hasPrefix(#"{"events":[{"#), body)
         XCTAssertTrue(body.contains(#""event":"level_up""#), body)
         XCTAssertTrue(body.contains(#""level":5"#), body)
         XCTAssertTrue(body.contains(#""premium":true"#), body)
@@ -1299,12 +1614,14 @@ final class StubProtocol: URLProtocol {
         let headers: [String: String]
         let connectionError: Bool
         let hang: Bool
+        var delay: TimeInterval = 0
     }
     struct Recorded {
         let path: String
         let method: String
         let headers: [String: String]
         let body: String
+        let timeout: TimeInterval
     }
 
     private static let lock = NSLock()
@@ -1324,7 +1641,7 @@ final class StubProtocol: URLProtocol {
 
     static func respond(
         containing substring: String, status: Int, body: String,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:], delay: TimeInterval = 0
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -1333,7 +1650,7 @@ final class StubProtocol: URLProtocol {
             (substring,
                 Stub(
                     status: status, body: body, headers: headers,
-                    connectionError: false, hang: false)))
+                    connectionError: false, hang: false, delay: delay)))
     }
 
     static func respondOnce(containing substring: String, status: Int, body: String) {
@@ -1402,6 +1719,12 @@ final class StubProtocol: URLProtocol {
         return recorded.last { $0.path.contains(substring) }?.body
     }
 
+    static func lastTimeout(containing substring: String) -> TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.last { $0.path.contains(substring) }?.timeout
+    }
+
     static func lastMethod(containing substring: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
@@ -1409,11 +1732,13 @@ final class StubProtocol: URLProtocol {
     }
 
     private static func record(
-        path: String, method: String, headers: [String: String], body: String
+        path: String, method: String, headers: [String: String], body: String,
+        timeout: TimeInterval
     ) {
         lock.lock()
         defer { lock.unlock() }
-        recorded.append(Recorded(path: path, method: method, headers: headers, body: body))
+        recorded.append(
+            Recorded(path: path, method: method, headers: headers, body: body, timeout: timeout))
     }
 
     /// URLSession hands URLProtocol an upload body as a stream, not
@@ -1461,7 +1786,8 @@ final class StubProtocol: URLProtocol {
             + (wireComponents?.percentEncodedQuery.map { "?\($0)" } ?? "")
         Self.record(
             path: wirePathAndQuery, method: request.httpMethod ?? "",
-            headers: request.allHTTPHeaderFields ?? [:], body: capturedBody())
+            headers: request.allHTTPHeaderFields ?? [:], body: capturedBody(),
+            timeout: request.timeoutInterval)
         guard let stub = Self.match(path) else {
             client?.urlProtocol(
                 self,
@@ -1478,6 +1804,11 @@ final class StubProtocol: URLProtocol {
                 self, didFailWithError: URLError(.notConnectedToInternet))
             return
         }
+        guard stub.delay > 0 else { return deliver(stub) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + stub.delay) { self.deliver(stub) }
+    }
+
+    private func deliver(_ stub: Stub) {
         var headerFields = stub.headers
         headerFields["Content-Type"] = "application/json"
         client?.urlProtocol(
