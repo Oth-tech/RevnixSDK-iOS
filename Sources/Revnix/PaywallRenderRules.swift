@@ -85,6 +85,49 @@ public func revnixIsBlockVisible(
     }
 }
 
+func revnixTimerText(_ block: TimerBlock, shownAt: Date, now: Date) -> String? {
+    let deadline = block.duration.map { shownAt.addingTimeInterval(TimeInterval($0)) }
+        ?? block.endsAt.flatMap(revnixParseInstant)
+        ?? .distantPast
+    let remaining = max(0, Int(deadline.timeIntervalSince(now).rounded(.down)))
+    guard remaining > 0 else { return block.expiredText }
+    return revnixFormatTimer(block.format ?? "{hh}:{mm}:{ss}", remaining: remaining)
+}
+
+func revnixFormatTimer(_ format: String, remaining r: Int) -> String {
+    var below = r
+    var out = format
+    for (token, unit) in [("{d}", 86400), ("{hh}", 3600), ("{mm}", 60), ("{ss}", 1)] where format.contains(token) {
+        let value = below / unit
+        below %= unit
+        out = out.replacingOccurrences(of: token, with: unit == 86400 ? String(value) : String(format: "%02ld", value))
+    }
+    return out
+}
+
+private func revnixParseInstant(_ value: String) -> Date? {
+    let shapes: [ISO8601DateFormatter.Options] = [
+        [.withInternetDateTime], [.withInternetDateTime, .withFractionalSeconds], [.withFullDate],
+    ]
+    for shape in shapes {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = shape
+        if let date = formatter.date(from: value) { return date }
+    }
+    return nil
+}
+
+func revnixToggleState(
+    _ block: ToggleBlock,
+    packages: [RevnixPaywallPackage],
+    selectedPackageId: String?
+) -> (isOn: Bool, tapSelects: String)? {
+    guard let on = block.onPackageIndex, let off = block.offPackageIndex,
+          packages.indices.contains(on), packages.indices.contains(off) else { return nil }
+    let isOn = packages[on].packageId == selectedPackageId
+    return (isOn, packages[isOn ? off : on].packageId)
+}
+
 // MARK: - The resolved tree
 
 /// One block as the renderer would draw it for a given selection.

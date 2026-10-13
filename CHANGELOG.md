@@ -4,6 +4,7 @@
 
 ### Added
 
+- Paywall blocks: `timer` (countdown to a date or from when the paywall opens), `video` (muted looping clip with a poster), `toggle` (free-trial switch that flips the selected package) and the card `carousel` layout (swipeable pages with dots and optional auto-advance).
 - `flushEvents()` sends queued events now. `track` and `logPaywallEvent` are
   queued on disk (up to 1000) and sent in batches: at 20 queued, 10 s after
   the first, on background, and on the next launch. A transient failure

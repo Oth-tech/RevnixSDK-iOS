@@ -362,4 +362,97 @@ final class PaywallBlockTests: XCTestCase {
         XCTAssertEqual(pinned.packageIndex, 1)
         XCTAssertEqual(repeated.repeatMode, "packages")
     }
+
+    func testDecodesTimerVideoToggleAndCarousel() throws {
+        let doc = try decodeDoc("""
+            {\(Self.palette),"blocks":[
+              {"id":"t1","type":"timer","duration":600,"format":"{mm}:{ss}","expiredText":"Gone"},
+              {"id":"t2","type":"timer","endsAt":"2026-10-31T23:59:59Z"},
+              {"id":"v1","type":"video","url":"https://cdn.example.com/a.mp4","poster":"https://cdn.example.com/a.jpg","fit":"contain"},
+              {"id":"g1","type":"toggle","label":"Free trial","onPackageIndex":0,"offPackageIndex":1},
+              {"id":"x","type":"hologram"},
+              {"id":"c1","type":"card","layout":"carousel","autoAdvance":4,"children":[
+                {"id":"p1","type":"image","style":{"inset":true}},{"id":"p2","type":"text","text":"two"}]}
+            ]}
+            """)
+        XCTAssertEqual(doc.blocks.count, 6)
+        guard case let .timer(byDuration) = doc.blocks[0] else { return XCTFail("expected timer") }
+        XCTAssertEqual(byDuration.duration, 600)
+        XCTAssertEqual(byDuration.format, "{mm}:{ss}")
+        XCTAssertEqual(byDuration.expiredText, "Gone")
+        guard case let .timer(byDeadline) = doc.blocks[1] else { return XCTFail("expected timer") }
+        XCTAssertEqual(byDeadline.endsAt, "2026-10-31T23:59:59Z")
+        XCTAssertNil(byDeadline.duration)
+        guard case let .video(video) = doc.blocks[2] else { return XCTFail("expected video") }
+        XCTAssertEqual(video.url, "https://cdn.example.com/a.mp4")
+        XCTAssertEqual(video.poster, "https://cdn.example.com/a.jpg")
+        XCTAssertEqual(video.fit, "contain")
+        guard case let .toggle(toggle) = doc.blocks[3] else { return XCTFail("expected toggle") }
+        XCTAssertEqual(toggle.label, "Free trial")
+        XCTAssertEqual(toggle.onPackageIndex, 0)
+        XCTAssertEqual(toggle.offPackageIndex, 1)
+        guard case .unknown = doc.blocks[4] else { return XCTFail("expected unknown") }
+        guard case let .card(carousel) = doc.blocks[5] else { return XCTFail("expected card") }
+        XCTAssertEqual(carousel.layout, "carousel")
+        XCTAssertEqual(carousel.autoAdvance, 4)
+        XCTAssertEqual(carousel.children.count, 2)
+    }
+
+    func testTimerFormatsTheContractExamples() {
+        XCTAssertEqual(revnixFormatTimer("{hh}:{mm}:{ss}", remaining: 3725), "01:02:05")
+        XCTAssertEqual(revnixFormatTimer("{d}d {hh}:{mm}:{ss}", remaining: 90061), "1d 01:01:01")
+        XCTAssertEqual(revnixFormatTimer("{hh}:{mm}", remaining: 90061), "25:01")
+        XCTAssertEqual(revnixFormatTimer("{ss}|{ss}", remaining: 7), "07|07", "every occurrence is replaced")
+        XCTAssertEqual(revnixFormatTimer("{mm}:{ss}", remaining: 5400), "90:00")
+        XCTAssertEqual(revnixFormatTimer("{mm}:{ss}", remaining: 7200), "120:00")
+        XCTAssertEqual(revnixFormatTimer("{ss}s", remaining: 125), "125s")
+    }
+
+    func testTimerCountsFromFirstDisplayAndExpires() {
+        let shown = Date(timeIntervalSince1970: 1_000_000)
+        let timer = TimerBlock(id: "t", duration: 600, format: "{mm}:{ss}", expiredText: "Gone")
+        XCTAssertEqual(revnixTimerText(timer, shownAt: shown, now: shown), "10:00")
+        XCTAssertEqual(revnixTimerText(timer, shownAt: shown, now: shown.addingTimeInterval(90.6)), "08:29")
+        XCTAssertEqual(revnixTimerText(timer, shownAt: shown, now: shown.addingTimeInterval(600)), "Gone")
+        var silent = timer
+        silent.expiredText = nil
+        XCTAssertNil(revnixTimerText(silent, shownAt: shown, now: shown.addingTimeInterval(601)))
+    }
+
+    func testTimerReadsEndsAtAndTreatsAnUnparseableOneAsExpired() {
+        let now = Date(timeIntervalSince1970: 1_793_491_199 - 3725)
+        let fixed = TimerBlock(id: "t", endsAt: "2026-10-31T23:59:59Z")
+        XCTAssertEqual(revnixTimerText(fixed, shownAt: .distantPast, now: now), "01:02:05")
+        let millis = TimerBlock(id: "t", endsAt: "2026-10-31T23:59:59.000Z")
+        XCTAssertEqual(revnixTimerText(millis, shownAt: .distantPast, now: now), "01:02:05")
+        let broken = TimerBlock(id: "t", endsAt: "soon", expiredText: "Gone")
+        XCTAssertEqual(revnixTimerText(broken, shownAt: now, now: now), "Gone")
+    }
+
+    func testToggleIsOnForItsPackageAndATapSelectsTheOther() {
+        let toggle = ToggleBlock(id: "g", label: "Free trial", onPackageIndex: 0, offPackageIndex: 1)
+        let on = revnixToggleState(toggle, packages: packages, selectedPackageId: "annual")
+        XCTAssertEqual(on?.isOn, true)
+        XCTAssertEqual(on?.tapSelects, "monthly")
+        let off = revnixToggleState(toggle, packages: packages, selectedPackageId: "monthly")
+        XCTAssertEqual(off?.isOn, false)
+        XCTAssertEqual(off?.tapSelects, "annual")
+    }
+
+    func testToggleOutsideTheOfferingIsNotDrawn() {
+        let toggle = ToggleBlock(id: "g", label: "Free trial", onPackageIndex: 0, offPackageIndex: 2)
+        XCTAssertNil(revnixToggleState(toggle, packages: packages, selectedPackageId: "annual"))
+        let unindexed = ToggleBlock(id: "g", label: "Free trial")
+        XCTAssertNil(revnixToggleState(unindexed, packages: packages, selectedPackageId: "annual"))
+    }
+
+    func testACloseInsideACarouselDoesNotSuppressTheFallback() throws {
+        let doc = try decodeDoc("""
+            {\(Self.palette),"blocks":[
+              {"id":"c","type":"card","layout":"carousel","children":[
+                {"id":"p1","type":"text","text":"one"},{"id":"x","type":"text","text":"×","action":"close"}]}
+            ]}
+            """)
+        XCTAssertFalse(revnixHasCloseAction(doc.blocks))
+    }
 }
