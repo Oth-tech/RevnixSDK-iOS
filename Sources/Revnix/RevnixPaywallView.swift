@@ -245,6 +245,7 @@ public struct RevnixPaywallView: View {
     @State private var purchaseAttempts = 0
     @State private var didReportNoProducts = false
     @State private var showPreviewAlert = false
+    @State private var shownAt = Date()
     @Environment(\.openURL) private var openURL
 
     /// - Parameters:
@@ -471,6 +472,7 @@ public struct RevnixPaywallView: View {
                 onPrivacy: onPrivacy,
                 onClose: onClose.map { close in { reportCloseThen(close) } },
                 openURL: { url in openURL(url) },
+                shownAt: shownAt,
                 onDiagnostic: renderDiagnostic
             )
         )

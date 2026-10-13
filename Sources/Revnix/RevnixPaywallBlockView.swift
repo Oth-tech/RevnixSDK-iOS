@@ -22,6 +22,13 @@
 
 #if canImport(SwiftUI)
 import SwiftUI
+#if os(macOS)
+import AVFoundation
+typealias RevnixNativeView = NSView
+#elseif !os(watchOS)
+import AVFoundation
+typealias RevnixNativeView = UIView
+#endif
 
 // MARK: - Tag variables
 
@@ -502,6 +509,7 @@ struct BlockContext {
     /// drawn at all — a dead close button is worse than none.
     let onClose: (() -> Void)?
     let openURL: (URL) -> Void
+    let shownAt: Date
     /// Where the renderer reports a paint string it could not read. The screen
     /// still draws — a fill falls back to a colour from the design — but the
     /// host gets told, which is what a silent black screen never did.
@@ -610,6 +618,40 @@ struct BlockView: View {
         case let .image(b):
             ImageBlockView(block: b, style: style, ctx: ctx, inStack: inStack)
                 .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
+
+        case let .timer(b):
+            TimelineView(.periodic(from: ctx.shownAt, by: 1)) { timeline in
+                if let text = revnixTimerText(b, shownAt: ctx.shownAt, now: timeline.date) {
+                    Text(text)
+                        .modifier(TextStyling(style: style, doc: doc, onDiagnostic: ctx.onDiagnostic))
+                        .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+                }
+            }
+
+        case let .video(b):
+            ImageBlockView(
+                block: ImageBlock(id: b.id, url: b.poster, fit: b.fit),
+                style: style, ctx: ctx, inStack: inStack, video: b
+            )
+
+        case let .toggle(b):
+            if let state = revnixToggleState(b, packages: ctx.packages, selectedPackageId: ctx.selectedPackageId) {
+                let label = revnixResolveTags(b.label, package: tagPackage, all: ctx.packages)
+                HStack(spacing: 12) {
+                    Text(label)
+                        .modifier(TextStyling(style: style, doc: doc, onDiagnostic: ctx.onDiagnostic))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Toggle(isOn: Binding(get: { state.isOn }, set: { _ in ctx.onSelect(state.tapSelects) })) {
+                        Text(label)
+                    }
+                    .labelsHidden()
+                    .modifier(RevnixSwitchStyle())
+                    .tint(revnixBlockColor(doc.accent, doc) ?? .accentColor)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { ctx.onSelect(state.tapSelects) }
+                .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+            }
 
         case let .list(b):
             VStack(alignment: .leading, spacing: style?.gap ?? 8) {
@@ -787,9 +829,10 @@ private struct ImageBlockView: View {
     let style: BlockStyle?
     let ctx: BlockContext
     let inStack: Bool
+    var video: VideoBlock?
 
     var body: some View {
-        let url = (block.url?.isEmpty == false ? block.url : nil) ?? ctx.heroImageUrl
+        let url = video == nil ? (block.url?.isEmpty == false ? block.url : nil) ?? ctx.heroImageUrl : block.url
         let inset = inStack && style?.inset == true
         // A converted design sizes its own slot; the 160pt default is only for
         // a slot dropped into a flow column, and must not fight it.
@@ -813,6 +856,11 @@ private struct ImageBlockView: View {
                     }
                 } else {
                     slot
+                }
+            }
+            .overlay {
+                if let video {
+                    RevnixLoopingVideo(block: video, onDiagnostic: ctx.onDiagnostic)
                 }
             }
             .frame(height: sized ? nil : 160)
@@ -1047,6 +1095,8 @@ private struct CardBlockView: View {
                 LazyVGrid(columns: gridColumns, spacing: spacing) {
                     childViews(children, pkg, inStack: false)
                 }
+            case "carousel":
+                CarouselView(pages: children, ctx: ctx, package: pkg, autoAdvance: block.autoAdvance)
             default:
                 // column, and anything unrecognized.
                 VStack(alignment: crossAlignmentHorizontal, spacing: spacing) {
@@ -1054,8 +1104,15 @@ private struct CardBlockView: View {
                 }
             }
         }
-        .revnixBlockStyle(style, ctx.doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
+        .revnixBlockStyle(boxStyle(style, kind: kind), ctx.doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
         .modifier(SelectOnTap(packageId: packageId, onSelect: ctx.onSelect))
+    }
+
+    private func boxStyle(_ style: BlockStyle?, kind: String) -> BlockStyle? {
+        guard kind == "carousel", style?.height?.points == nil else { return style }
+        var sized = style ?? BlockStyle()
+        sized.height = .points(220)
+        return sized
     }
 
     @ViewBuilder
@@ -1095,6 +1152,154 @@ private struct CardBlockView: View {
         }
     }
 }
+
+// ponytail: macOS has no paged TabView, so it draws the current page and only
+// autoAdvance turns it; add scrollTargetBehavior(.paging) (macOS 14) if macOS swipe matters.
+private struct CarouselView: View {
+    let pages: [PaywallBlock]
+    let ctx: BlockContext
+    let package: RevnixPaywallPackage?
+    let autoAdvance: Int?
+
+    @State private var page = 0
+
+    var body: some View {
+        paged
+            .overlay(alignment: .bottom) {
+                if pages.count > 1 {
+                    HStack(spacing: 6) {
+                        ForEach(pages.indices, id: \.self) { index in
+                            Circle()
+                                .fill(index == page
+                                    ? revnixBlockColor(ctx.doc.accent, ctx.doc) ?? .accentColor
+                                    : (revnixBlockColor(ctx.doc.textColor, ctx.doc) ?? .primary).opacity(0.3))
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+                    .padding(.bottom, 8)
+                }
+            }
+            .task(id: page) {
+                guard let seconds = autoAdvance, seconds > 0, pages.count > 1,
+                      (try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)) != nil
+                else { return }
+                withAnimation { page = (page + 1) % pages.count }
+            }
+    }
+
+    @ViewBuilder
+    private var paged: some View {
+        #if os(macOS)
+        if pages.indices.contains(page) { pageView(pages[page]) }
+        #else
+        TabView(selection: $page) {
+            ForEach(Array(pages.enumerated()), id: \.offset) { index, child in
+                pageView(child).tag(index)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        #endif
+    }
+
+    private func pageView(_ child: PaywallBlock) -> some View {
+        BlockView(block: child, ctx: ctx, package: package, inStack: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// macOS draws a Toggle as a checkbox unless asked for the switch.
+private struct RevnixSwitchStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content.toggleStyle(.switch)
+        #else
+        content
+        #endif
+    }
+}
+
+/// AVPlayerLayer does not exist on watchOS, so there the poster stands in.
+private struct RevnixLoopingVideo: View {
+    let block: VideoBlock
+    let onDiagnostic: ((String) -> Void)?
+
+    var body: some View {
+        #if os(watchOS)
+        Color.clear.onAppear { onDiagnostic?("video drawn as its poster: no built-in player") }
+        #else
+        if let url = URL(string: block.url) {
+            RevnixLoopingPlayer(url: url, cover: block.fit != "contain").allowsHitTesting(false)
+        }
+        #endif
+    }
+}
+
+#if os(macOS)
+private struct RevnixLoopingPlayer: NSViewRepresentable {
+    let url: URL
+    let cover: Bool
+
+    func makeNSView(context: Context) -> RevnixLoopingPlayerView { RevnixLoopingPlayerView(url: url, cover: cover) }
+    func updateNSView(_ view: RevnixLoopingPlayerView, context: Context) {}
+}
+#elseif !os(watchOS)
+private struct RevnixLoopingPlayer: UIViewRepresentable {
+    let url: URL
+    let cover: Bool
+
+    func makeUIView(context: Context) -> RevnixLoopingPlayerView { RevnixLoopingPlayerView(url: url, cover: cover) }
+    func updateUIView(_ view: RevnixLoopingPlayerView, context: Context) {}
+}
+#endif
+
+#if !os(watchOS)
+final class RevnixLoopingPlayerView: RevnixNativeView {
+    private let player = AVQueuePlayer()
+    private var looper: AVPlayerLooper?
+    private var readiness: NSKeyValueObservation?
+    private var audioSilencers: [NSKeyValueObservation] = []
+
+    #if os(macOS)
+    override func makeBackingLayer() -> CALayer { AVPlayerLayer() }
+    #else
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    #endif
+
+    init(url: URL, cover: Bool) {
+        super.init(frame: .zero)
+        #if os(macOS)
+        wantsLayer = true
+        #endif
+        isHidden = true
+        guard let playerLayer = layer as? AVPlayerLayer else { return }
+        player.isMuted = true
+        player.preventsDisplaySleepDuringVideoPlayback = false
+        playerLayer.player = player
+        playerLayer.videoGravity = cover ? .resizeAspectFill : .resizeAspect
+        readiness = playerLayer.observe(\.isReadyForDisplay) { [weak self] layer, _ in
+            let ready = layer.isReadyForDisplay
+            DispatchQueue.main.async { self?.isHidden = !ready }
+        }
+        let looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
+        audioSilencers = looper.loopingPlayerItems.map { item in
+            item.observe(\.tracks, options: [.initial]) { item, _ in
+                for track in item.tracks where track.assetTrack?.mediaType == .audio { track.isEnabled = false }
+            }
+        }
+        for item in looper.loopingPlayerItems {
+            Task {
+                if let audible = try? await item.asset.loadMediaSelectionGroup(for: .audible) {
+                    item.select(nil, in: audible)
+                }
+            }
+        }
+        self.looper = looper
+        player.play()
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+#endif
 
 // MARK: - Screen
 

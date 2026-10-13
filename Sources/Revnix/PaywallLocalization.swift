@@ -134,6 +134,13 @@ private func revnixLocalize(
     case var .button(b):
         b.label = lookup("\(b.id).label", b.label)
         return .button(b)
+    case var .toggle(b):
+        b.label = lookup("\(b.id).label", b.label)
+        return .toggle(b)
+    case var .timer(b):
+        if let value = b.format { b.format = lookup("\(b.id).format", value) }
+        if let value = b.expiredText { b.expiredText = lookup("\(b.id).expiredText", value) }
+        return .timer(b)
     case var .list(b):
         b.items = b.items.enumerated().map { index, item in
             var item = item

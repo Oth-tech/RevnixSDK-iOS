@@ -164,6 +164,28 @@ final class PaywallLocalizationTests: XCTestCase {
         XCTAssertEqual(text(doc.localized("es").blocks.first), "Unlock Pro")
     }
 
+    func testTimerAndToggleStringsAreLocalized() throws {
+        let json = """
+            {"version":1,"background":"#000","textColor":"#fff","accent":"#6478ff","accentInk":"#fff",
+             "defaultLocale":"en","locales":{"es":{
+               "t1.format":"Termina en {mm}:{ss}","t1.expiredText":"Oferta terminada",
+               "t2.format":"nunca","g1.label":"Prueba gratis"}},
+             "blocks":[
+               {"id":"t1","type":"timer","duration":600,"format":"Ends in {mm}:{ss}","expiredText":"Expired"},
+               {"id":"t2","type":"timer","duration":600},
+               {"id":"g1","type":"toggle","label":"Free trial","onPackageIndex":0,"offPackageIndex":1}]}
+            """
+        let out = try JSONDecoder().decode(PaywallBlockDoc.self, from: Data(json.utf8)).localized("es")
+        guard case let .timer(timer) = out.blocks[0] else { return XCTFail("expected a timer") }
+        XCTAssertEqual(timer.format, "Termina en {mm}:{ss}")
+        XCTAssertEqual(timer.expiredText, "Oferta terminada")
+        guard case let .timer(bare) = out.blocks[1] else { return XCTFail("expected a timer") }
+        XCTAssertNil(bare.format, "an absent format stays absent so the default applies")
+        XCTAssertNil(bare.expiredText)
+        guard case let .toggle(toggle) = out.blocks[2] else { return XCTFail("expected a toggle") }
+        XCTAssertEqual(toggle.label, "Prueba gratis")
+    }
+
     func testMalformedTableCostsTheTranslationsNotThePaywall() throws {
         let json = """
             {"version":1,"background":"#000","textColor":"#fff","accent":"#6478ff",

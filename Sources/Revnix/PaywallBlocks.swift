@@ -431,13 +431,55 @@ public struct SpacerBlock: Sendable, Equatable {
     public var visibility: BlockVisibility?
 }
 
+/// Countdown text. `endsAt` is one deadline for everyone; `duration` counts
+/// from the moment this paywall view opened. At zero it draws `expiredText`,
+/// or nothing when that is absent. Tokens in `format`: {d} {hh} {mm} {ss}.
+public struct TimerBlock: Sendable, Equatable {
+    public var id: String
+    public var endsAt: String?
+    public var duration: Int?
+    public var format: String?
+    public var expiredText: String?
+    public var style: BlockStyle?
+    public var selectedStyle: BlockStyle?
+    public var visibility: BlockVisibility?
+}
+
+/// A muted clip that autoplays and loops, sized like an image block. `poster`
+/// is drawn until the first frame, and in its place where it cannot play.
+public struct VideoBlock: Sendable, Equatable {
+    public var id: String
+    public var url: String
+    public var poster: String?
+    public var fit: String?
+    public var style: BlockStyle?
+    public var selectedStyle: BlockStyle?
+    public var visibility: BlockVisibility?
+}
+
+/// The free-trial switch: ON while package `onPackageIndex` is selected, and
+/// tapping it selects the other one. Hidden when the offering does not reach
+/// both indices.
+public struct ToggleBlock: Sendable, Equatable {
+    public var id: String
+    public var label: String
+    public var onPackageIndex: Int?
+    public var offPackageIndex: Int?
+    public var style: BlockStyle?
+    public var selectedStyle: BlockStyle?
+    public var visibility: BlockVisibility?
+}
+
 /// The one container block. `layout` picks how children are placed: column /
 /// row are flex lines, `stack` layers them (children position with
-/// style.inset or the edge offsets), and `grid` is an N-column grid — which
-/// map onto SwiftUI's VStack / HStack / ZStack / LazyVGrid.
+/// style.inset or the edge offsets), `grid` is an N-column grid and
+/// `carousel` pages through its children — which map onto SwiftUI's VStack /
+/// HStack / ZStack / LazyVGrid / paged TabView.
 public struct CardBlock: Sendable, Equatable {
     public var id: String
     public var layout: String?
+    /// carousel only: seconds per page before it moves on by itself.
+    public var autoAdvance: Int?
     /// Renders this container once per package in the attached offering.
     public var repeatMode: String?
     /// Merged over `style` on the package the customer has selected.
@@ -470,6 +512,9 @@ public indirect enum PaywallBlock: Sendable, Equatable {
     case line(LineBlock)
     case spacer(SpacerBlock)
     case card(CardBlock)
+    case timer(TimerBlock)
+    case video(VideoBlock)
+    case toggle(ToggleBlock)
     case unknown
 }
 
@@ -479,7 +524,8 @@ extension PaywallBlock: Decodable {
         case direction, titleTpl, priceTpl, highlightSub, badgeText, cardStyle, highlightStyle
         case label, showRestore, showTerms, showPrivacy, termsUrl, privacyUrl
         case flex, layout, `repeat`, selectedStyle, packageIndex, columns, gridColumns, children
-        case visibility
+        case visibility, autoAdvance, endsAt, duration, format, expiredText, poster
+        case onPackageIndex, offPackageIndex
     }
 
     public init(from decoder: Decoder) throws {
@@ -494,6 +540,7 @@ extension PaywallBlock: Decodable {
         func string(_ key: Keys) -> String? { (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil }
         func bool(_ key: Keys) -> Bool? { (try? c.decodeIfPresent(Bool.self, forKey: key)) ?? nil }
         func styleAt(_ key: Keys) -> BlockStyle? { (try? c.decodeIfPresent(BlockStyle.self, forKey: key)) ?? nil }
+        func int(_ key: Keys) -> Int? { (try? c.decodeIfPresent(Int.self, forKey: key)) ?? nil }
         // An action value this SDK does not know decodes to nil, leaving the
         // element inert rather than failing the block — the same forgiveness
         // the unknown-type catch-all gives.
@@ -554,10 +601,27 @@ extension PaywallBlock: Decodable {
             let columns = (try? c.decodeIfPresent(Int.self, forKey: .columns)) as? Int
             let index = (try? c.decodeIfPresent(Int.self, forKey: .packageIndex)) as? Int
             self = .card(CardBlock(
-                id: id, layout: string(.layout), repeatMode: string(.repeat),
+                id: id, layout: string(.layout), autoAdvance: int(.autoAdvance), repeatMode: string(.repeat),
                 selectedStyle: selectedStyle, visibility: visibility, packageIndex: index,
                 columns: columns, gridColumns: string(.gridColumns),
                 children: children, style: style
+            ))
+        case "timer":
+            self = .timer(TimerBlock(
+                id: id, endsAt: string(.endsAt), duration: int(.duration), format: string(.format),
+                expiredText: string(.expiredText), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
+            ))
+        case "video":
+            self = .video(VideoBlock(
+                id: id, url: string(.url) ?? "", poster: string(.poster), fit: string(.fit), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
+            ))
+        case "toggle":
+            self = .toggle(ToggleBlock(
+                id: id, label: string(.label) ?? "", onPackageIndex: int(.onPackageIndex),
+                offPackageIndex: int(.offPackageIndex), style: style,
+                selectedStyle: selectedStyle, visibility: visibility
             ))
         default:
             // A block type from a newer dashboard. Skipped at render time.
@@ -577,6 +641,9 @@ extension PaywallBlock: Decodable {
         case let .line(b): return b.style
         case let .spacer(b): return b.style
         case let .card(b): return b.style
+        case let .timer(b): return b.style
+        case let .video(b): return b.style
+        case let .toggle(b): return b.style
         case .unknown: return nil
         }
     }
@@ -593,6 +660,9 @@ extension PaywallBlock: Decodable {
         case let .line(b): return b.selectedStyle
         case let .spacer(b): return b.selectedStyle
         case let .card(b): return b.selectedStyle
+        case let .timer(b): return b.selectedStyle
+        case let .video(b): return b.selectedStyle
+        case let .toggle(b): return b.selectedStyle
         case .unknown: return nil
         }
     }
@@ -609,6 +679,9 @@ extension PaywallBlock: Decodable {
         case let .line(b): return b.visibility
         case let .spacer(b): return b.visibility
         case let .card(b): return b.visibility
+        case let .timer(b): return b.visibility
+        case let .video(b): return b.visibility
+        case let .toggle(b): return b.visibility
         case .unknown: return nil
         }
     }
@@ -624,6 +697,9 @@ extension PaywallBlock: Decodable {
         case let .line(b): return b.id
         case let .spacer(b): return b.id
         case let .card(b): return b.id
+        case let .timer(b): return b.id
+        case let .video(b): return b.id
+        case let .toggle(b): return b.id
         case .unknown: return ""
         }
     }
@@ -758,7 +834,8 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
 /// Conditional containers are deliberately not searched: a `repeat` card
 /// renders once per package (none, when the offering is empty) and a
 /// `packageIndex` card is hidden when the offering does not reach that index,
-/// so a close authored inside one MIGHT not appear. Counting it would
+/// and a `carousel` shows a later page only after a swipe, so a close
+/// authored inside one MIGHT not appear. Counting it would
 /// suppress the fallback and leave the customer with no way out — the exact
 /// bug this feature exists to fix. Two close buttons is merely ugly, so the
 /// tie breaks toward always having one.
@@ -774,7 +851,7 @@ public func revnixHasCloseAction(_ blocks: [PaywallBlock]) -> Bool {
         case let .image(b): return b.action == .close
         case let .button(b): return b.action == .close
         case let .card(b):
-            guard b.repeatMode == nil, b.packageIndex == nil else { return false }
+            guard b.repeatMode == nil, b.packageIndex == nil, b.layout != "carousel" else { return false }
             return revnixHasCloseAction(b.children)
         default: return false
         }
