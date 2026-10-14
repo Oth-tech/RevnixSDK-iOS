@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.8.0 (2026-10-14)
+
 ### Added
 
 - Paywall blocks: onboarding `screens` shown before the paywall, with `next`/`back` actions on text, image and button blocks and progress dots while an intro screen is showing.
@@ -12,6 +14,7 @@
 
 - Paywall blocks: `timer` (countdown to a date or from when the paywall opens), `video` (muted looping clip with a poster), `toggle` (free-trial switch that flips the selected package) and the card `carousel` layout (swipeable pages with dots and optional auto-advance).
 
+## 1.6.0 (2026-10-12)
 ## 1.6.0 (2026-10-12)
 
 ### Added
@@ -32,9 +35,15 @@
 
 ## 1.5.0 (2026-10-08)
 ## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
 
 Changes since 1.4.1 were not recorded here; see the commit log.
 
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
@@ -46,6 +55,14 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   1.4.1 to match `react-native-revnix` and `revnix-capacitor`, no API
   changes.
 
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
@@ -119,6 +136,22 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   `onImplicitPaywall` handler; a paywall shows only when implicit placements
   and `deeplink_open` are configured. `start()` after `stop()` resumes this.
 
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
 ## 0.3.0
 ## 0.3.0
 ## 0.3.0
