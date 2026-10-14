@@ -281,8 +281,14 @@ public enum BlockDimension: Codable, Sendable, Equatable {
 /// as it does today, so a design carrying a close chip degrades to inert. A
 /// new block type would have decoded to `.unknown` and vanished from the
 /// screen instead — worse than the bug this fixes.
+///
+/// `next` and `back` move between onboarding `screens`; the dashboard only
+/// publishes them inside an intro screen, and where one has nowhere to go the
+/// block is inert.
 public enum BlockAction: String, Sendable, Equatable {
     case close
+    case next
+    case back
 }
 
 /// When a block is drawn, relative to the package card it sits inside (render
@@ -765,6 +771,9 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
     public var accentInk: String
     public var fontFamily: String?
     public var blocks: [PaywallBlock]
+    /// Onboarding screens shown in order before `blocks`, which is always the
+    /// last screen. Empty for a single-screen paywall.
+    public var screens: [[PaywallBlock]]
     /// REV-271: the design's translations. Empty for a paywall published in
     /// one language, which is every paywall written before this shipped —
     /// `localized(_:)` is then a no-op and the tree renders as authored.
@@ -778,7 +787,7 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
 
     private enum Keys: String, CodingKey {
         case version, layout, background, textColor, accent, accentInk, fontFamily, blocks
-        case defaultLocale, locales
+        case defaultLocale, locales, screens
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -794,6 +803,17 @@ public struct PaywallBlockDoc: Codable, Sendable, Equatable {
             throw DecodingError.dataCorruptedError(forKey: .blocks, in: c, debugDescription: "no blocks")
         }
         self.blocks = blocks
+        var screens: [[PaywallBlock]] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .screens) {
+            while !list.isAtEnd {
+                if let screen = try? list.decode([PaywallBlock].self) {
+                    if !screen.isEmpty { screens.append(screen) }
+                } else if (try? list.decode(RevnixJSONValue.self)) == nil {
+                    break
+                }
+            }
+        }
+        self.screens = screens
         version = ((try? c.decodeIfPresent(Int.self, forKey: .version)) as? Int) ?? 1
         layout = try? c.decodeIfPresent(String.self, forKey: .layout)
         // `background` is a plain string in the original form and an object in

@@ -514,6 +514,17 @@ struct BlockContext {
     /// still draws — a fill falls back to a colour from the design — but the
     /// host gets told, which is what a silent black screen never did.
     var onDiagnostic: ((String) -> Void)?
+    var onNext: (() -> Void)?
+    var onBack: (() -> Void)?
+
+    func handler(for action: BlockAction?) -> (() -> Void)? {
+        switch action {
+        case .close: return onClose
+        case .next: return onNext
+        case .back: return onBack
+        case nil: return nil
+        }
+    }
 
     /// The package root-level copy resolves its tags against (contract §2).
     var selectedPackage: RevnixPaywallPackage? {
@@ -521,23 +532,24 @@ struct BlockContext {
     }
 }
 
-/// Makes an element the paywall's dismiss target when the design marks it as
-/// one. A block with no close action installs no gesture at all, so it never
-/// swallows a tap meant for what sits behind it.
-struct CloseOnTap: ViewModifier {
+struct ActionOnTap: ViewModifier {
     let action: BlockAction?
-    let onClose: (() -> Void)?
+    let ctx: BlockContext
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if action == .close, let onClose {
+        if let perform = ctx.handler(for: action) {
             // The whole box is the target, not just the glyph: a close chip
             // is mostly padding, and a bare × is well under the 44pt minimum.
-            content
+            let target = content
                 .contentShape(Rectangle())
-                .onTapGesture(perform: onClose)
+                .onTapGesture(perform: perform)
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("Close")
+            if action == .close {
+                target.accessibilityLabel("Close")
+            } else {
+                target
+            }
         } else {
             content
         }
@@ -613,11 +625,11 @@ struct BlockView: View {
             Text(revnixResolveTags(b.text, package: tagPackage, all: ctx.packages))
                 .modifier(TextStyling(style: style, doc: doc, onDiagnostic: ctx.onDiagnostic))
                 .revnixBlockStyle(style, doc, inStack: inStack, diagnostic: ctx.onDiagnostic)
-                .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
+                .modifier(ActionOnTap(action: b.action, ctx: ctx))
 
         case let .image(b):
             ImageBlockView(block: b, style: style, ctx: ctx, inStack: inStack)
-                .modifier(CloseOnTap(action: b.action, onClose: ctx.onClose))
+                .modifier(ActionOnTap(action: b.action, ctx: ctx))
 
         case let .timer(b):
             TimelineView(.periodic(from: ctx.shownAt, by: 1)) { timeline in
@@ -683,10 +695,11 @@ struct BlockView: View {
             // accented thing on the screen, or a "Not now" competes with
             // "Subscribe" for the eye.
             let closesPaywall = b.action == .close && ctx.onClose != nil
+            let navigates = b.action == .next || b.action == .back
             // Loading disables purchasing and swaps the label for a spinner
             // (contract §4). A close button keeps working: the customer must
             // be able to leave while a purchase is in flight.
-            let busy = ctx.loading && !closesPaywall
+            let busy = ctx.loading && !closesPaywall && !navigates
             // `strippedBox` hands the box back to us, so the fill is resolved
             // here rather than by the style modifier — which is why a gradient
             // CTA used to flatten to the plain accent.
@@ -699,8 +712,8 @@ struct BlockView: View {
                 ? (revnixBlockColor(doc.textColor, doc) ?? .primary)
                 : (revnixBlockColor(doc.accentInk, doc) ?? .white)
             Button {
-                if closesPaywall {
-                    ctx.onClose?()
+                if closesPaywall || navigates {
+                    ctx.handler(for: b.action)?()
                 } else if !ctx.loading, let id = ctx.selectedPackageId ?? ctx.packages.first?.packageId {
                     ctx.onPurchase(id)
                 }
@@ -1167,16 +1180,8 @@ private struct CarouselView: View {
         paged
             .overlay(alignment: .bottom) {
                 if pages.count > 1 {
-                    HStack(spacing: 6) {
-                        ForEach(pages.indices, id: \.self) { index in
-                            Circle()
-                                .fill(index == page
-                                    ? revnixBlockColor(ctx.doc.accent, ctx.doc) ?? .accentColor
-                                    : (revnixBlockColor(ctx.doc.textColor, ctx.doc) ?? .primary).opacity(0.3))
-                                .frame(width: 6, height: 6)
-                        }
-                    }
-                    .padding(.bottom, 8)
+                    RevnixDots(count: pages.count, active: page, doc: ctx.doc)
+                        .padding(.bottom, 8)
                 }
             }
             .task(id: page) {
@@ -1204,6 +1209,24 @@ private struct CarouselView: View {
     private func pageView(_ child: PaywallBlock) -> some View {
         BlockView(block: child, ctx: ctx, package: package, inStack: true)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct RevnixDots: View {
+    let count: Int
+    let active: Int
+    let doc: PaywallBlockDoc
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<count, id: \.self) { index in
+                Circle()
+                    .fill(index == active
+                        ? revnixBlockColor(doc.accent, doc) ?? .accentColor
+                        : (revnixBlockColor(doc.textColor, doc) ?? .primary).opacity(0.3))
+                    .frame(width: 6, height: 6)
+            }
+        }
     }
 }
 
@@ -1325,19 +1348,49 @@ struct RevnixPaywallBlockView: View {
     let doc: PaywallBlockDoc
     let ctx: BlockContext
 
+    @State private var screen = 0
+
+    private var isIntro: Bool { doc.screens.indices.contains(screen) }
+    private var blocks: [PaywallBlock] { isIntro ? doc.screens[screen] : doc.blocks }
+
+    private var screenCtx: BlockContext {
+        var ctx = ctx
+        if isIntro {
+            ctx.onNext = { screen += 1 }
+            if screen > 0 { ctx.onBack = { screen -= 1 } }
+        }
+        return ctx
+    }
+
     var body: some View {
         // REV-252: the close is overlaid OUTSIDE the canvas scale and inside
         // the safe area, so it keeps its tap size and its distance from the
         // screen edge whatever the device does to the design.
         ZStack(alignment: .topTrailing) {
-            if doc.layout == "canvas" {
-                canvas.ignoresSafeArea()
-            } else {
-                flow
+            Group {
+                if doc.layout == "canvas" {
+                    canvas.ignoresSafeArea()
+                } else {
+                    flow
+                }
             }
+            .id(screen)
+            progressDots
             fallbackClose
         }
         .background(screenBackground.ignoresSafeArea())
+        .onChange(of: doc) { _ in screen = 0 }
+    }
+
+    @ViewBuilder private var progressDots: some View {
+        if isIntro {
+            RevnixDots(count: doc.screens.count + 1, active: screen, doc: doc)
+                .padding(.top, 20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .ignoresSafeArea(edges: doc.layout == "canvas" ? .top : [])
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     private var canvas: some View {
@@ -1373,7 +1426,7 @@ struct RevnixPaywallBlockView: View {
     /// from the screen's own ink rather than a fixed white, so it stays
     /// legible on a light design as well as a dark one.
     @ViewBuilder private var fallbackClose: some View {
-        if let onClose = ctx.onClose, !revnixHasCloseAction(doc.blocks) {
+        if let onClose = ctx.onClose, !revnixHasCloseAction(blocks) {
             let ink = revnixBlockColor(doc.textColor, doc) ?? .primary
             Button(action: onClose) {
                 Text(verbatim: "\u{00D7}")
@@ -1417,8 +1470,8 @@ struct RevnixPaywallBlockView: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(doc.blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block, ctx: ctx)
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                BlockView(block: block, ctx: screenCtx)
             }
         }
     }
