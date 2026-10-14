@@ -455,4 +455,59 @@ final class PaywallBlockTests: XCTestCase {
             """)
         XCTAssertFalse(revnixHasCloseAction(doc.blocks))
     }
+
+
+    private static let onboarding = """
+        {\(palette),
+         "screens":[
+           [{"id":"s1_t","type":"text","text":"Welcome"},{"id":"s1_n","type":"button","label":"Continue","action":"next"}],
+           "junk",
+           [],
+           [{"id":"s2_b","type":"text","text":"Back","action":"back"},{"id":"s2_x","type":"image","action":"close"},
+            {"id":"s2_n","type":"button","label":"Continue","action":"next"},{"type":"hologram"}]
+         ],
+         "blocks":[{"id":"p_t","type":"text","text":"Go Pro"},{"id":"p_b","type":"button","label":"Start"}],
+         "locales":{"es":{"s1_t.text":"Bienvenido","s1_n.label":"Continuar","p_t.text":"Hazte Pro"}}}
+        """
+
+    func testDecodesScreensAndNavigationActions() throws {
+        let doc = try decodeDoc(Self.onboarding)
+        XCTAssertEqual(doc.screens.count, 2)
+        guard case let .button(next) = doc.screens[0][1] else { return XCTFail("expected button") }
+        XCTAssertEqual(next.action, .next)
+        guard case let .text(back) = doc.screens[1][0] else { return XCTFail("expected text") }
+        XCTAssertEqual(back.action, .back)
+        XCTAssertEqual(doc.screens[1][3], .unknown)
+        XCTAssertEqual(doc.blocks.count, 2)
+    }
+
+    func testADocWithoutScreensHasNone() throws {
+        let doc = try decodeDoc(#"{\#(Self.palette),"blocks":[{"id":"t","type":"text","text":"x"}]}"#)
+        XCTAssertEqual(doc.screens, [])
+        let malformed = try decodeDoc(#"{\#(Self.palette),"screens":"no","blocks":[{"id":"t","type":"text","text":"x"}]}"#)
+        XCTAssertEqual(malformed.screens, [])
+    }
+
+    func testAnUnknownActionStillDecodesToNil() throws {
+        let doc = try decodeDoc(#"{\#(Self.palette),"blocks":[{"id":"b","type":"button","label":"Go","action":"skip"}]}"#)
+        guard case let .button(b) = doc.blocks[0] else { return XCTFail("expected button") }
+        XCTAssertNil(b.action)
+    }
+
+    func testLocalizationReachesScreenBlocks() throws {
+        let doc = try decodeDoc(Self.onboarding).localized("es")
+        guard case let .text(title) = doc.screens[0][0], case let .button(cta) = doc.screens[0][1],
+              case let .text(paywall) = doc.blocks[0]
+        else { return XCTFail("expected text, button, text") }
+        XCTAssertEqual(title.text, "Bienvenido")
+        XCTAssertEqual(cta.label, "Continuar")
+        XCTAssertEqual(paywall.text, "Hazte Pro")
+    }
+
+    func testCloseActionIsJudgedPerScreen() throws {
+        let doc = try decodeDoc(Self.onboarding)
+        XCTAssertFalse(revnixHasCloseAction(doc.screens[0]))
+        XCTAssertTrue(revnixHasCloseAction(doc.screens[1]))
+        XCTAssertFalse(revnixHasCloseAction(doc.blocks))
+    }
 }

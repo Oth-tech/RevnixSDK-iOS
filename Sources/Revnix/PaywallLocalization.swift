@@ -195,6 +195,7 @@ extension PaywallBlockDoc {
         }
         var copy = self
         copy.blocks = blocks.map { revnixLocalize($0, lookup) }
+        copy.screens = screens.map { $0.map { revnixLocalize($0, lookup) } }
         copy.localization.defaultLocale = chain[0]
         return copy
     }
