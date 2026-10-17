@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.8.1 (2026-10-17)
+
 ### Changed
 
 - Privacy manifest: `NSPrivacyTracking` is now `true`, and Device ID (IDFA) and Purchase History are declared as used for tracking with the developer advertising purpose, since ad network integrations receive purchase events, and the IDFA once the user allows tracking. `NSPrivacyTrackingDomains` is left out so iOS never blocks the Revnix API for users who deny ATT.
@@ -13,11 +15,14 @@
 - Paywall blocks: onboarding `screens` shown before the paywall, with `next`/`back` actions on text, image and button blocks and progress dots while an intro screen is showing.
 
 ## 1.7.0 (2026-10-13)
+## 1.7.0 (2026-10-13)
 
 ### Added
 
 - Paywall blocks: `timer` (countdown to a date or from when the paywall opens), `video` (muted looping clip with a poster), `toggle` (free-trial switch that flips the selected package) and the card `carousel` layout (swipeable pages with dots and optional auto-advance).
 
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
 ## 1.6.0 (2026-10-12)
 ## 1.6.0 (2026-10-12)
 
@@ -41,9 +46,21 @@
 ## 1.5.0 (2026-10-08)
 ## 1.5.0 (2026-10-08)
 ## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
 
 Changes since 1.4.1 were not recorded here; see the commit log.
 
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
@@ -59,6 +76,22 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   1.4.1 to match `react-native-revnix` and `revnix-capacitor`, no API
   changes.
 
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
@@ -140,6 +173,38 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   `onImplicitPaywall` handler; a paywall shows only when implicit placements
   and `deeplink_open` are configured. `start()` after `stop()` resumes this.
 
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
 ## 0.3.0
 ## 0.3.0
 ## 0.3.0
