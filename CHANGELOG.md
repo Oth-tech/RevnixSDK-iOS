@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Privacy manifest: `NSPrivacyTracking` is now `true`, and Device ID (IDFA) and Purchase History are declared as used for tracking with the developer advertising purpose, since ad network integrations receive purchase events, and the IDFA once the user allows tracking. `NSPrivacyTrackingDomains` is left out so iOS never blocks the Revnix API for users who deny ATT.
+
 ## 1.8.0 (2026-10-14)
 
 ### Added
