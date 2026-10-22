@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- `updateSkanConversionValue` also updates AdAttributionKit on iOS 17.4+ when a coarse value is given (SKAN first, then AdAttributionKit; its failures go to `onDiagnostic`). Fine-only updates go to SKAN only. The framework is weak-linked, so iOS 16 still works.
+
+### Changed
+
+- `handleDeepLink` reports only scheme, host, path and known attribution query params (utm_*, campaign_id, pid, gclid, gbraid, wbraid, ttclid, sccid, twclid, revnix_link, web_id and similar). Other query params, the fragment and credentials are dropped before upload. `resolveDeepLink` still sends the full URL.
+
 ## 1.8.1 (2026-10-17)
 
 ### Changed
