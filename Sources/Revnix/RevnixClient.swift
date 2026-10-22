@@ -64,7 +64,7 @@ public actor RevnixClient {
     /// offline cold start must not disable every implicit moment until the
     /// next launch. `implicitConfigRetryAt` keeps that retry from happening on
     /// every paywall close of an offline session: one probe per minute.
-    private var implicitConfigTask: Task<Set<String>, Error>?
+    private var implicitConfigTask: Task<ImplicitConfigResponse, Error>?
     private var implicitConfigRetryAt: Date = .distantPast
     private var lifecycleCancel: (@Sendable () -> Void)?
     /// When the app last went to the BACKGROUND, or nil while it has not. A
@@ -412,9 +412,19 @@ public actor RevnixClient {
 
     /// Which of the six this app has configured. See `implicitConfigTask`.
     private func implicitConfig() async -> Set<String> {
+        Set(await loadConfig()?.implicitPlacements ?? [])
+    }
+
+    /// App feature flags from Settings → Flags in the dashboard, read once per
+    /// launch. `[:]` when unavailable (offline, old server, none set). Never throws.
+    public func flags() async -> [String: JSONValue] {
+        await loadConfig()?.flags ?? [:]
+    }
+
+    private func loadConfig() async -> ImplicitConfigResponse? {
         if implicitConfigTask == nil, config.now() < implicitConfigRetryAt {
             // Inside the hold after a failure: answer "none" without a request.
-            return []
+            return nil
         }
         let task = implicitConfigTask ?? Task { [self] in
             // The id does not change the answer — this route is
@@ -423,8 +433,7 @@ public actor RevnixClient {
             let data = try await request(
                 path: "/v1/config", method: "GET",
                 query: [URLQueryItem(name: "customer", value: customerId())])
-            let body = try decode(ImplicitConfigResponse.self, from: data)
-            return Set(body.implicitPlacements ?? [])
+            return try decode(ImplicitConfigResponse.self, from: data)
         }
         implicitConfigTask = task
         do {
@@ -434,7 +443,7 @@ public actor RevnixClient {
             implicitConfigRetryAt = config.now().addingTimeInterval(Self.implicitConfigRetryHold)
             bgFailures += 1
             diagnostic(op: "implicitConfig", message: "\(error)")
-            return []
+            return nil
         }
     }
 
@@ -520,6 +529,7 @@ public actor RevnixClient {
 
     private struct ImplicitConfigResponse: Decodable {
         let implicitPlacements: [String]?
+        let flags: [String: JSONValue]?
     }
 
     /// POST /v1/placements/triggered body: the resolve shape with every field
@@ -560,6 +570,18 @@ public actor RevnixClient {
         // set it — a new anonymous session is not a new install.
         mintedThisLaunch = true
         return minted
+    }
+
+    /// Adopts `userId` as this device's customer id. No network call: your
+    /// backend must call `POST /v1/identify` with a secret key to merge the
+    /// anonymous customer's history. Empty or over 200 chars is ignored.
+    @discardableResult
+    public func identify(_ userId: String) -> String {
+        _ = customerId()
+        let id = userId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id.utf16.count <= 200 else { return customerId() }
+        config.storage.set(Keys.customerId, id)
+        return id
     }
 
     /// Fresh anonymous identity. Per-customer caches age out via LRU.
@@ -791,6 +813,7 @@ public actor RevnixClient {
             body["signedTransactionInfo"] = .string(v)
         }
         if let v = input.rawPayload { body["rawPayload"] = v }
+        if let v = input.decisionId { body["decisionId"] = .string(v) }
         let data = try await request(path: "/v1/purchases", method: "POST", body: body)
         return try decode(RegisterPurchaseResult.self, from: data)
     }
@@ -1284,6 +1307,16 @@ public actor RevnixClient {
     /// RevnixClient always returns an id.
     @discardableResult
     public func logPaywallDisplay(placementKey: String?, paywallId: String?) async -> String? {
+        await logPaywallDisplay(placementKey: placementKey, paywallId: paywallId, decisionId: nil)
+    }
+
+    /// `decisionId` is `PlacementResolution.decisionId` of the paywall shown.
+    @discardableResult
+    public func logPaywallDisplay(
+        placementKey: String?, paywallId: String?, decisionId: String? = nil,
+        priceShown: Double? = nil, screenIndex: Int? = nil, blockId: String? = nil,
+        durationMs: Int? = nil
+    ) async -> String? {
         let viewId = UUID().uuidString.lowercased()
         // REV-272 LOOP GUARD: a display whose placement is one of the six came
         // FROM an implicit trigger, so its dismissal must not fire another one
@@ -1305,6 +1338,9 @@ public actor RevnixClient {
         ]
         if let v = placementKey { body["placementKey"] = .string(v) }
         if let v = paywallId { body["paywallId"] = .string(v) }
+        addAttribution(
+            &body, decisionId: decisionId, priceShown: priceShown, screenIndex: screenIndex,
+            blockId: blockId, durationMs: durationMs)
         do {
             _ = try await request(path: "/v1/paywalls/viewed", method: "POST", body: body)
         } catch {
@@ -1326,6 +1362,15 @@ public actor RevnixClient {
     /// `RevnixPaywallView` only reports its close affordances, never a
     /// purchase-driven dismissal.
     public func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {
+        await logPaywallClosed(
+            viewId: viewId, placementKey: placementKey, paywallId: paywallId, decisionId: nil)
+    }
+
+    public func logPaywallClosed(
+        viewId: String, placementKey: String?, paywallId: String?, decisionId: String? = nil,
+        priceShown: Double? = nil, screenIndex: Int? = nil, blockId: String? = nil,
+        durationMs: Int? = nil
+    ) async {
         guard placementKey != revnixPreviewPlacementKey else { return }
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
@@ -1334,6 +1379,9 @@ public actor RevnixClient {
         ]
         if let v = placementKey { body["placementKey"] = .string(v) }
         if let v = paywallId { body["paywallId"] = .string(v) }
+        addAttribution(
+            &body, decisionId: decisionId, priceShown: priceShown, screenIndex: screenIndex,
+            blockId: blockId, durationMs: durationMs)
         do {
             _ = try await request(path: "/v1/paywalls/closed", method: "POST", body: body)
         } catch {
@@ -1377,6 +1425,27 @@ public actor RevnixClient {
         message: String? = nil,
         eventId: String? = nil
     ) async {
+        await logPaywallEvent(
+            event, viewId: viewId, placementKey: placementKey, paywallId: paywallId,
+            productId: productId, code: code, message: message, eventId: eventId,
+            decisionId: nil)
+    }
+
+    public func logPaywallEvent(
+        _ event: RevnixPaywallEvent,
+        viewId: String,
+        placementKey: String? = nil,
+        paywallId: String? = nil,
+        productId: String? = nil,
+        code: String? = nil,
+        message: String? = nil,
+        eventId: String? = nil,
+        decisionId: String? = nil,
+        priceShown: Double? = nil,
+        screenIndex: Int? = nil,
+        blockId: String? = nil,
+        durationMs: Int? = nil
+    ) async {
         guard placementKey != revnixPreviewPlacementKey else { return }
         var body: [String: JSONValue] = [
             "customerId": .string(customerId()),
@@ -1393,6 +1462,9 @@ public actor RevnixClient {
         // The server bounds `message` at 1024; trimming here keeps a long
         // localized store error from turning the whole report into a 400.
         if let v = message { body["message"] = .string(String(v.prefix(1024))) }
+        addAttribution(
+            &body, decisionId: decisionId, priceShown: priceShown, screenIndex: screenIndex,
+            blockId: blockId, durationMs: durationMs)
         enqueueEvent(QueuedEvent(path: "/v1/paywalls/events", body: body))
         // REV-272: backing out of the store sheet is the `transaction_abandon`
         // moment. Reuses the paywall.purchase_abandoned just reported.
@@ -1400,6 +1472,17 @@ public actor RevnixClient {
             await fireImplicitFromPaywall(
                 .transactionAbandon, viewId: viewId, paywallId: paywallId)
         }
+    }
+
+    private func addAttribution(
+        _ body: inout [String: JSONValue], decisionId: String?, priceShown: Double?,
+        screenIndex: Int?, blockId: String?, durationMs: Int?
+    ) {
+        if let v = decisionId { body["decisionId"] = .string(v) }
+        if let v = priceShown, v.isFinite, v >= 0 { body["priceShown"] = .number(v) }
+        if let v = screenIndex, v >= 0 { body["screenIndex"] = .number(Double(v)) }
+        if let v = blockId { body["blockId"] = .string(v) }
+        if let v = durationMs, v >= 0 { body["durationMs"] = .number(Double(v)) }
     }
 
     /// Report impression-level ad revenue from your mediation SDK's paid-event
@@ -1793,6 +1876,7 @@ public actor RevnixClient {
         let signedTransactionInfo: String?
         let rawPayload: JSONValue?
         var queuedAt: Int?
+        var decisionId: String?
 
         var input: RegisterPurchaseInput {
             RegisterPurchaseInput(
@@ -1800,7 +1884,7 @@ public actor RevnixClient {
                 productId: productId, transactionId: transactionId,
                 occurredAt: occurredAt, expiresAt: expiresAt,
                 signedTransactionInfo: signedTransactionInfo,
-                rawPayload: rawPayload)
+                rawPayload: rawPayload, decisionId: decisionId)
         }
     }
 
@@ -1908,7 +1992,8 @@ public actor RevnixClient {
                 productId: input.productId, transactionId: input.transactionId,
                 occurredAt: input.occurredAt, expiresAt: input.expiresAt,
                 signedTransactionInfo: input.signedTransactionInfo,
-                rawPayload: input.rawPayload, queuedAt: nowMs()))
+                rawPayload: input.rawPayload, queuedAt: nowMs(),
+                decisionId: input.decisionId))
         persistQueue(items)
     }
 

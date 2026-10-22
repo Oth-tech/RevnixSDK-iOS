@@ -28,13 +28,14 @@
         @discardableResult
         public static func purchase(
             _ product: Product, client: RevnixClient,
-            options: Set<Product.PurchaseOption> = []
+            options: Set<Product.PurchaseOption> = [], decisionId: String? = nil
         ) async throws -> RegisterPurchaseResult? {
             let outcome = try await product.purchase(options: options)
             switch outcome {
             case .success(let verification):
                 return try await register(
-                    verification, client: client, finish: true, throwOnFailure: true)
+                    verification, client: client, finish: true, throwOnFailure: true,
+                    decisionId: decisionId)
             case .userCancelled, .pending:
                 return nil
             @unknown default:
@@ -63,7 +64,8 @@
         @discardableResult
         private static func register(
             _ verification: VerificationResult<Transaction>,
-            client: RevnixClient, finish: Bool, throwOnFailure: Bool = false
+            client: RevnixClient, finish: Bool, throwOnFailure: Bool = false,
+            decisionId: String? = nil
         ) async throws -> RegisterPurchaseResult? {
             // The SERVER is the verifier of record — forward the JWS either
             // way and let it check the chain (matches the backend's
@@ -83,7 +85,8 @@
                 expiresAt: transaction.expirationDate.map {
                     Int($0.timeIntervalSince1970 * 1000)
                 },
-                signedTransactionInfo: verification.jwsRepresentation
+                signedTransactionInfo: verification.jwsRepresentation,
+                decisionId: decisionId
             )
             do {
                 let result = try await client.registerPurchase(input)

@@ -89,12 +89,16 @@ public struct RegisterPurchaseInput: Sendable {
     /// StoreKit 2 JWS — the proof path; claims without it are provisional.
     public let signedTransactionInfo: String?
     public let rawPayload: JSONValue?
+    /// `PlacementResolution.decisionId` of the paywall this purchase came from.
+    public let decisionId: String?
 
     public init(
         source: RevnixStore, token: String, productId: String,
         transactionId: String, occurredAt: Int? = nil, expiresAt: Int? = nil,
-        signedTransactionInfo: String? = nil, rawPayload: JSONValue? = nil
+        signedTransactionInfo: String? = nil, rawPayload: JSONValue? = nil,
+        decisionId: String? = nil
     ) {
+        self.decisionId = decisionId
         self.source = source
         self.token = token
         self.productId = productId
@@ -325,6 +329,8 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
     /// Set only on a dashboard QR/link preview resolution
     /// (`GET /v1/paywalls/preview/{token}`), never on a real resolve.
     public let preview: Bool?
+    /// Server-minted id of this resolve decision; nil from an older server.
+    public let decisionId: String?
 
     public init(
         status: String,
@@ -335,8 +341,10 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
         experiment: PlacementExperiment? = nil,
         paywallJSON: JSONValue? = nil,
         experimentJSON: JSONValue? = nil,
-        preview: Bool? = nil
+        preview: Bool? = nil,
+        decisionId: String? = nil
     ) {
+        self.decisionId = decisionId
         self.status = status
         self.placementKey = placementKey
         self.revision = revision
@@ -349,7 +357,7 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case status, placementKey, revision, offering, paywall, experiment, preview
+        case status, placementKey, revision, offering, paywall, experiment, preview, decisionId
     }
 
     public init(from decoder: Decoder) throws {
@@ -359,6 +367,7 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
         revision = try c.decode(Int.self, forKey: .revision)
         offering = try c.decode(PlacementOffering.self, forKey: .offering)
         preview = try c.decodeIfPresent(Bool.self, forKey: .preview)
+        decisionId = try c.decodeIfPresent(String.self, forKey: .decisionId)
         // Same key read twice: once loose, once typed. `decodeIfPresent`
         // already folds a JSON null into nil, so `.null` never lands here.
         // The typed reads are `try?` for the same reason `PaywallConfig`
@@ -391,5 +400,6 @@ public struct PlacementResolution: Codable, Sendable, Equatable {
             try c.encodeIfPresent(experiment, forKey: .experiment)
         }
         try c.encodeIfPresent(preview, forKey: .preview)
+        try c.encodeIfPresent(decisionId, forKey: .decisionId)
     }
 }

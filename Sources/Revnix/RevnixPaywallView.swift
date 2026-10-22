@@ -174,6 +174,32 @@ public protocol RevnixPaywallViewReporting: Sendable {
         eventId: String?
     ) async
 
+    func logPaywallDisplay(
+        placementKey: String?, paywallId: String?, decisionId: String?, priceShown: Double?,
+        screenIndex: Int?, blockId: String?, durationMs: Int?
+    ) async -> String?
+
+    func logPaywallClosed(
+        viewId: String, placementKey: String?, paywallId: String?, decisionId: String?,
+        priceShown: Double?, screenIndex: Int?, blockId: String?, durationMs: Int?
+    ) async
+
+    func logPaywallEvent(
+        _ event: RevnixPaywallEvent,
+        viewId: String,
+        placementKey: String?,
+        paywallId: String?,
+        productId: String?,
+        code: String?,
+        message: String?,
+        eventId: String?,
+        decisionId: String?,
+        priceShown: Double?,
+        screenIndex: Int?,
+        blockId: String?,
+        durationMs: Int?
+    ) async
+
     /// Reports a paint string the block renderer could not read.
     ///
     /// Local only — it never leaves the device. The renderer keeps drawing (an
@@ -192,6 +218,40 @@ public extension RevnixPaywallViewReporting {
     }
 
     func logPaywallClosed(viewId: String, placementKey: String?, paywallId: String?) async {}
+
+    func logPaywallDisplay(
+        placementKey: String?, paywallId: String?, decisionId: String?, priceShown: Double?,
+        screenIndex: Int?, blockId: String?, durationMs: Int?
+    ) async -> String? {
+        await logPaywallDisplay(placementKey: placementKey, paywallId: paywallId)
+    }
+
+    func logPaywallClosed(
+        viewId: String, placementKey: String?, paywallId: String?, decisionId: String?,
+        priceShown: Double?, screenIndex: Int?, blockId: String?, durationMs: Int?
+    ) async {
+        await logPaywallClosed(viewId: viewId, placementKey: placementKey, paywallId: paywallId)
+    }
+
+    func logPaywallEvent(
+        _ event: RevnixPaywallEvent,
+        viewId: String,
+        placementKey: String?,
+        paywallId: String?,
+        productId: String?,
+        code: String?,
+        message: String?,
+        eventId: String?,
+        decisionId: String?,
+        priceShown: Double?,
+        screenIndex: Int?,
+        blockId: String?,
+        durationMs: Int?
+    ) async {
+        await logPaywallEvent(
+            event, viewId: viewId, placementKey: placementKey, paywallId: paywallId,
+            productId: productId, code: code, message: message, eventId: eventId)
+    }
 
     func logPaywallEvent(
         _ event: RevnixPaywallEvent,
@@ -226,6 +286,7 @@ public struct RevnixPaywallView: View {
     private let client: (any RevnixPaywallViewReporting)?
     private let placementKey: String?
     private let paywallId: String?
+    private let decisionId: String?
     private let disableViewTracking: Bool
     /// An explicit sink for render diagnostics, for a host that renders
     /// without passing `client`. When both are given both are called.
@@ -286,8 +347,10 @@ public struct RevnixPaywallView: View {
         paywallId: String? = nil,
         disableViewTracking: Bool = false,
         onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
-        locale: String? = nil
+        locale: String? = nil,
+        decisionId: String? = nil
     ) {
+        self.decisionId = decisionId
         self.config = config
         self.packages = packages
         self.onPurchase = onPurchase
@@ -551,10 +614,13 @@ public struct RevnixPaywallView: View {
         didReportView = true
         let placementKey = placementKey
         let paywallId = paywallId
+        let decisionId = decisionId
         viewReport = Task {
             // A reporter that predates REV-252 answers nil; the close then
             // still fires, it just cannot be paired with this display.
-            await client.logPaywallDisplay(placementKey: placementKey, paywallId: paywallId)
+            await client.logPaywallDisplay(
+                placementKey: placementKey, paywallId: paywallId, decisionId: decisionId,
+                priceShown: nil, screenIndex: nil, blockId: nil, durationMs: nil)
         }
     }
 
@@ -577,6 +643,7 @@ public struct RevnixPaywallView: View {
         guard let client, !disableViewTracking, let viewReport else { return }
         let placementKey = placementKey
         let paywallId = paywallId
+        let decisionId = decisionId
         Task {
             // Awaiting the view beacon for the same reason the close does: an
             // interaction reported before the display id exists could not be
@@ -590,7 +657,9 @@ public struct RevnixPaywallView: View {
                 productId: productId,
                 code: code,
                 message: message,
-                eventId: eventId.map { "\(viewId):\($0)" }
+                eventId: eventId.map { "\(viewId):\($0)" },
+                decisionId: decisionId,
+                priceShown: nil, screenIndex: nil, blockId: nil, durationMs: nil
             )
         }
     }
@@ -640,13 +709,17 @@ public struct RevnixPaywallView: View {
         guard let client, !disableViewTracking, let viewReport else { return }
         let placementKey = placementKey
         let paywallId = paywallId
+        let decisionId = decisionId
+        let durationMs = max(0, Int(Date().timeIntervalSince(shownAt) * 1000))
         Task {
             // Awaiting the view beacon is what keeps the pair intact when the
             // customer dismisses before it lands. It has usually finished long
             // ago, in which case this resumes immediately.
             guard let viewId = await viewReport.value else { return }
             await client.logPaywallClosed(
-                viewId: viewId, placementKey: placementKey, paywallId: paywallId)
+                viewId: viewId, placementKey: placementKey, paywallId: paywallId,
+                decisionId: decisionId, priceShown: nil, screenIndex: nil, blockId: nil,
+                durationMs: durationMs)
         }
     }
 

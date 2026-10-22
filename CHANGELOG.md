@@ -4,6 +4,9 @@
 
 ### Added
 
+- `flags()` returns the app feature flags set in Settings → Flags in the dashboard, read once per launch (`[:]` when unavailable). It shares the one `/v1/config` request with implicit placements.
+- `PlacementResolution.decisionId` and an optional `decisionId` on `RegisterPurchaseInput`. `logPaywallDisplay`, `logPaywallClosed` and `logPaywallEvent` take optional `decisionId`, `priceShown`, `screenIndex`, `blockId` and `durationMs`, sent only when set. `RevnixPaywallView` takes `decisionId` and reports it plus `durationMs` on close. `RevnixStoreKit.purchase(_:client:options:decisionId:)` forwards it to the purchase.
+- `identify(_:)` makes the device act as the given customer id (no network call). Your backend must still call `POST /v1/identify` with a secret key to merge history.
 - `updateSkanConversionValue` also updates AdAttributionKit on iOS 17.4+ when a coarse value is given (SKAN first, then AdAttributionKit; its failures go to `onDiagnostic`). Fine-only updates go to SKAN only. The framework is weak-linked, so iOS 16 still works.
 
 ### Changed
