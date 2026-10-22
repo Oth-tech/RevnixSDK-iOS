@@ -231,11 +231,38 @@ public actor RevnixClient {
         }
         recordLastDeepLink(url)
         let extra: [String: JSONValue] = [
-            "url": .string(String(raw.prefix(1024))),
+            "url": .string(String(Self.reportableDeepLink(raw).prefix(1024))),
         ]
         var present = true
         if let batch = launchBatch { present = !(await batch.value) }
         _ = await fireImplicit(.deeplinkOpen, extra: extra, present: present)
+    }
+
+    static let reportableQueryNames: Set<String> = [
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "pid", "source",
+        "af_channel", "medium", "c", "campaign", "term", "af_ad", "content", "gclid", "gbraid",
+        "wbraid", "ttclid", "sccid", "twclid", "revnix_link", "web_id", "utm_id", "campaign_id",
+    ]
+
+    static func reportableDeepLink(_ raw: String) -> String {
+        var rest = Substring(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        if let hash = rest.firstIndex(of: "#") { rest = rest[..<hash] }
+        let base: Substring
+        var query: Substring = ""
+        if let mark = rest.firstIndex(of: "?") {
+            base = rest[..<mark]
+            query = rest[rest.index(after: mark)...]
+        } else {
+            base = rest
+        }
+        let bare = base.replacingOccurrences(
+            of: #"^([A-Za-z][A-Za-z0-9+.-]*://)[^/\\]*@"#, with: "$1", options: .regularExpression)
+        let kept = query.split(separator: "&", omittingEmptySubsequences: true).filter {
+            let name = String($0.prefix { $0 != "=" })
+            return reportableQueryNames.contains(
+                (name.removingPercentEncoding ?? name).lowercased())
+        }
+        return kept.isEmpty ? bare : bare + "?" + kept.joined(separator: "&")
     }
 
     /// Unwrap a link an email service provider (Mailchimp, SendGrid, …)
@@ -1173,7 +1200,13 @@ public actor RevnixClient {
     {
         skanUpdatesInFlight += 1
         defer { skanUpdatesInFlight -= 1 }
-        try await (skanUpdater ?? RevnixSkan.update)(value, coarse, lockWindow)
+        if let skanUpdater {
+            try await skanUpdater(value, coarse, lockWindow)
+            return
+        }
+        try await RevnixSkan.update(
+            value, coarse: coarse, lockWindow: lockWindow,
+            onAakError: { self.diagnostic(op: "updateAdAttributionKit", message: "\($0)") })
     }
 
     private func markSkanRegistered() {
