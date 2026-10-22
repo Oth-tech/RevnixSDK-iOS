@@ -13,6 +13,30 @@ final class RevnixClientTests: XCTestCase {
         StubProtocol.reset()
     }
 
+    func testFlagsReturnsServerMapAndSharesOneRequest() async {
+        StubProtocol.respond(
+            containing: "/v1/config", status: 200,
+            body: #"{"revision":1,"implicitPlacements":[],"flags":{"a":true,"b":"x","c":3}}"#)
+        let client = makeClient()
+        let first = await client.flags()
+        let second = await client.flags()
+        XCTAssertEqual(first, ["a": .bool(true), "b": .string("x"), "c": .number(3)])
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/config"), 1)
+    }
+
+    func testFlagsEmptyWhenKeyAbsent() async {
+        StubProtocol.respond(containing: "/v1/config", status: 200, body: #"{"implicitPlacements":[]}"#)
+        let flags = await makeClient().flags()
+        XCTAssertEqual(flags, [:])
+    }
+
+    func testFlagsEmptyOnServerError() async {
+        StubProtocol.respond(containing: "/v1/config", status: 500, body: "{}")
+        let flags = await makeClient().flags()
+        XCTAssertEqual(flags, [:])
+    }
+
     // MARK: - Fixtures
 
     static let dayMs = 24 * 60 * 60 * 1000
@@ -574,6 +598,129 @@ final class RevnixClientTests: XCTestCase {
             PlacementExperiment(key: "summer-pricing", variantId: "var_b"))
         let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/placements"))
         XCTAssertTrue(path.hasSuffix("/offering?customer=cust%20one"), path)
+    }
+
+    func testIdentifyAdoptsIdAndSurvivesCustomerIdCall() async {
+        let client = makeClient()
+        let adopted = await client.identify("  user_42 ")
+        XCTAssertEqual(adopted, "user_42")
+        let current = await client.customerId()
+        XCTAssertEqual(current, "user_42")
+        let minted = await client.logout()
+        XCTAssertNotEqual(minted, "user_42")
+        let after = await client.customerId()
+        XCTAssertEqual(after, minted)
+    }
+
+    func testIdentifyIgnoresEmptyAndOverlongIds() async {
+        let client = makeClient()
+        let anon = await client.customerId()
+        let blank = await client.identify("   ")
+        let long = await client.identify(String(repeating: "x", count: 201))
+        let after = await client.customerId()
+        XCTAssertEqual(blank, anon)
+        XCTAssertEqual(long, anon)
+        XCTAssertEqual(after, anon)
+    }
+
+    func testPlacementResolutionDecodesDecisionIdWhenPresentAndNilWhenAbsent() throws {
+        let without = try JSONDecoder().decode(
+            PlacementResolution.self, from: Data(Self.placementBody.utf8))
+        XCTAssertNil(without.decisionId)
+        let withId = Self.placementBody.replacingOccurrences(
+            of: #""revision":1,"#, with: #""revision":1,"decisionId":"dec_1","#)
+        let decoded = try JSONDecoder().decode(PlacementResolution.self, from: Data(withId.utf8))
+        XCTAssertEqual(decoded.decisionId, "dec_1")
+        let again = try JSONDecoder().decode(
+            PlacementResolution.self, from: try JSONEncoder().encode(decoded))
+        XCTAssertEqual(again, decoded)
+    }
+
+    func testPaywallBeaconsCarryDecisionFieldsOnlyWhenGiven() async throws {
+        StubProtocol.respond(containing: "/v1/paywalls/viewed", status: 200, body: "{}")
+        StubProtocol.respond(containing: "/v1/paywalls/closed", status: 200, body: "{}")
+        StubProtocol.respond(
+            containing: "/v1/paywalls/events", status: 200, body: Self.batchResults([201]))
+        let client = makeClient()
+
+        let shown = await client.logPaywallDisplay(placementKey: "main", paywallId: "pw_1")
+        let viewId = try XCTUnwrap(shown)
+        var body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/viewed"))
+        for key in ["decisionId", "priceShown", "screenIndex", "blockId", "durationMs"] {
+            XCTAssertFalse(body.contains(key), key)
+        }
+
+        await client.logPaywallDisplay(
+            placementKey: "main", paywallId: "pw_1", decisionId: "dec_1", priceShown: 4.99)
+        body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/viewed"))
+        XCTAssertTrue(body.contains(#""decisionId":"dec_1""#), body)
+        XCTAssertTrue(body.contains(#""priceShown":4.99"#), body)
+
+        await client.logPaywallClosed(
+            viewId: viewId, placementKey: "main", paywallId: "pw_1", decisionId: "dec_1",
+            durationMs: 1500)
+        body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/closed"))
+        XCTAssertTrue(body.contains(#""durationMs":1500"#), body)
+        XCTAssertTrue(body.contains(#""decisionId":"dec_1""#), body)
+
+        await client.logPaywallDisplay(
+            placementKey: "main", paywallId: "pw_1", priceShown: -1, screenIndex: -1,
+            durationMs: -1)
+        body = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/viewed"))
+        for key in ["priceShown", "screenIndex", "durationMs"] {
+            XCTAssertFalse(body.contains(key), key)
+        }
+
+        await client.logPaywallEvent(
+            .restore, viewId: viewId, decisionId: "dec_1", screenIndex: 2, blockId: "blk_1")
+        await client.logPaywallEvent(.selected, viewId: viewId, eventId: "plain")
+        await client.flushEvents()
+        let events = try Self.batchEvents(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/events")))
+        XCTAssertEqual(events[0]["decisionId"], .string("dec_1"))
+        XCTAssertEqual(events[0]["screenIndex"], .number(2))
+        XCTAssertEqual(events[0]["blockId"], .string("blk_1"))
+        XCTAssertNil(events[1]["decisionId"])
+        XCTAssertNil(events[1]["durationMs"])
+    }
+
+    func testDecisionIdSurvivesThePendingPurchaseQueue() async throws {
+        StubProtocol.failWithConnectionError(containing: "/v1/purchases")
+        let client = makeClient()
+        let input = RegisterPurchaseInput(
+            source: .apple, token: "t", productId: "p", transactionId: "x", decisionId: "dec_9")
+        do { _ = try await client.registerPurchase(input) } catch {}
+        StubProtocol.respond(containing: "/v1/purchases", status: 200, body: Self.purchaseBody)
+        let delivered = await client.retryPendingPurchases()
+        XCTAssertEqual(delivered, 1)
+        XCTAssertTrue(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/purchases"))
+                .contains(#""decisionId":"dec_9""#))
+    }
+
+    func testIdentifyStoresIdOnFreshInstall() async {
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage)
+        _ = await client.identify("user_1")
+        XCTAssertEqual(storage.get("revnix.customerId"), "user_1")
+    }
+
+    func testRegisterPurchaseSendsDecisionIdOnlyWhenGiven() async throws {
+        StubProtocol.respond(containing: "/v1/purchases", status: 200, body: Self.purchaseBody)
+        let client = makeClient()
+        func input(_ decisionId: String?) -> RegisterPurchaseInput {
+            RegisterPurchaseInput(
+                source: .apple, token: "t", productId: "p", transactionId: "x",
+                decisionId: decisionId)
+        }
+        try await client.registerPurchase(input(nil))
+        XCTAssertFalse(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/purchases"))
+                .contains("decisionId"))
+        try await client.registerPurchase(input("dec_9"))
+        XCTAssertTrue(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/purchases"))
+                .contains(#""decisionId":"dec_9""#))
     }
 
     // MARK: - Device attribute contract (REV-268)
