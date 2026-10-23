@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 
@@ -70,25 +71,47 @@ final class RevnixClientTests: XCTestCase {
         onDiagnostic: (@Sendable (RevnixDiagnostic) -> Void)? = nil,
         device: DeviceFacts? = RevnixClientTests.fixedDevice,
         onDeferredDeepLink: (@Sendable (URL, DeferredDeepLinkMatch) -> Void)? = nil,
-        deviceIntegrity: Bool = false
+        deviceIntegrity: Bool = false,
+        lifecycle: RevnixAppLifecycle = .system
     ) -> RevnixClient {
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.protocolClasses = [StubProtocol.self]
-        return RevnixClient(
-            RevnixConfig(
-                apiKey: "rvx_pk_test_abc",
-                baseURL: URL(string: "https://example.convex.site")!,
-                storage: storage,
-                timeout: timeout,
-                entitlementsTTL: entitlementsTTL,
-                readYourWritesDelays: readYourWritesDelays,
-                onDiagnostic: onDiagnostic,
-                now: now,
-                session: URLSession(configuration: sessionConfig),
-                device: device,
-                onDeferredDeepLink: onDeferredDeepLink,
-                deviceIntegrity: deviceIntegrity
-            ))
+        var config = RevnixConfig(
+            apiKey: "rvx_pk_test_abc",
+            baseURL: URL(string: "https://example.convex.site")!,
+            storage: storage,
+            timeout: timeout,
+            entitlementsTTL: entitlementsTTL,
+            readYourWritesDelays: readYourWritesDelays,
+            onDiagnostic: onDiagnostic,
+            now: now,
+            session: URLSession(configuration: sessionConfig),
+            device: device,
+            onDeferredDeepLink: onDeferredDeepLink,
+            lifecycle: lifecycle,
+            deviceIntegrity: deviceIntegrity
+        )
+        config.entitlementKeys = [Self.signingKey.publicKey.derRepresentation.base64EncodedString()]
+        return RevnixClient(config)
+    }
+
+    static let signingKey = P256.Signing.PrivateKey()
+
+    static func sha256Hex(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func signatureHeaders(
+        _ body: String, cid: String, apiKey: String = "rvx_pk_test_abc",
+        key: P256.Signing.PrivateKey = signingKey,
+        signedAt: String = String(Int(Date().timeIntervalSince1970 * 1000))
+    ) -> [String: String] {
+        let message = "\(signedAt).\(sha256Hex(apiKey)).\(sha256Hex(cid)).\(body)"
+        let signature = try! key.signature(for: Data(message.utf8))
+        return [
+            "Revnix-Signed-At": signedAt,
+            "Revnix-Signature": signature.derRepresentation.base64EncodedString(),
+        ]
     }
 
     /// REV-268: a fixed device so the header is deterministic. The storefront
@@ -111,6 +134,204 @@ final class RevnixClientTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(condition(), "condition never became true")
+    }
+
+    func storedEntitlements(_ storage: MemoryStorage, _ cid: String) throws -> [String: Any] {
+        let raw = try XCTUnwrap(storage.get("revnix.ent.\(cid)"))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+    }
+
+    func restore(_ entry: [String: Any], _ storage: MemoryStorage, _ cid: String) throws {
+        let data = try JSONSerialization.data(withJSONObject: entry)
+        storage.set("revnix.ent.\(cid)", String(decoding: data, as: UTF8.self))
+    }
+
+    func testASignedSnapshotServesOffline() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.failWithConnectionError(containing: "/entitlements")
+        let client = makeClient(entitlementsTTL: 0)
+        _ = try await client.entitlements()
+
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, true)
+    }
+
+    func testATamperedBodyIsNotServed() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200,
+            body: Self.entitlementsBody(expiresAt: 1))
+        StubProtocol.failWithConnectionError(containing: "/entitlements")
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        let cid = await client.customerId()
+
+        var entry = try storedEntitlements(storage, cid)
+        entry["body"] = Self.entitlementsBody
+        try restore(entry, storage, cid)
+
+        let cached = await client.cachedEntitlements()
+        XCTAssertNil(cached)
+        do {
+            _ = try await client.entitlements()
+            XCTFail("a forged cache must not answer")
+        } catch {}
+    }
+
+    func cachedAfterARead(signedWith headers: [String: String]) async throws
+        -> CustomerEntitlements?
+    {
+        StubProtocol.respond(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody,
+            headers: headers)
+        let storage = MemoryStorage()
+        storage.set("revnix.customerId", "cust_1")
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        XCTAssertNotNil(storage.get("revnix.ent.cust_1"))
+        return await client.cachedEntitlements()
+    }
+
+    func testCorrectlyBoundHeadersAreServed() async throws {
+        let cached = try await cachedAfterARead(
+            signedWith: Self.signatureHeaders(Self.entitlementsBody, cid: "cust_1"))
+        XCTAssertNotNil(cached)
+    }
+
+    func testATamperedSignatureIsNotServed() async throws {
+        let cached = try await cachedAfterARead(
+            signedWith: Self.signatureHeaders(Self.entitlementsBody(expiresAt: 1), cid: "cust_1"))
+        XCTAssertNil(cached)
+    }
+
+    func testASignatureFromAnUnpinnedKeyIsRejected() async throws {
+        let cached = try await cachedAfterARead(
+            signedWith: Self.signatureHeaders(
+                Self.entitlementsBody, cid: "cust_1", key: P256.Signing.PrivateKey()))
+        XCTAssertNil(cached)
+    }
+
+    func testABlobSignedForAnotherCustomerIsRejected() async throws {
+        let cached = try await cachedAfterARead(
+            signedWith: Self.signatureHeaders(Self.entitlementsBody, cid: "cust_2"))
+        XCTAssertNil(cached)
+    }
+
+    func testABlobSignedForAnotherApiKeyIsRejected() async throws {
+        let cached = try await cachedAfterARead(
+            signedWith: Self.signatureHeaders(
+                Self.entitlementsBody, cid: "cust_1", apiKey: "rvx_pk_test_other"))
+        XCTAssertNil(cached)
+    }
+
+    func testAnIdWithReservedCharactersTravelsAsOneSegmentAndIsCached() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        StubProtocol.failWithConnectionError(containing: "/entitlements")
+        let client = makeClient(entitlementsTTL: 0)
+        let id = "josé a/b%"
+        await client.identify(id)
+        _ = try await client.entitlements()
+
+        let path = try XCTUnwrap(StubProtocol.lastPath(containing: "/entitlements"))
+        let segments = path.split(separator: "/")
+        XCTAssertEqual(segments.count, 4, path)
+        XCTAssertEqual(segments[2].removingPercentEncoding, id, path)
+        XCTAssertEqual(segments[3], "entitlements")
+
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, true)
+    }
+
+    func testTheKeyHashIgnoresSurroundingWhitespace() async throws {
+        let storage = MemoryStorage()
+        storage.set("revnix.customerId", "cust_1")
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [StubProtocol.self]
+        var config = RevnixConfig(
+            apiKey: " rvx_pk_test_abc\n",
+            baseURL: URL(string: "https://example.convex.site/")!,
+            storage: storage, entitlementsTTL: 0,
+            session: URLSession(configuration: sessionConfig), device: nil, lifecycle: .disabled)
+        config.entitlementKeys = [Self.signingKey.publicKey.derRepresentation.base64EncodedString()]
+        StubProtocol.respond(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody,
+            headers: Self.signatureHeaders(Self.entitlementsBody, cid: "cust_1"))
+        let client = RevnixClient(config)
+        _ = try await client.entitlements()
+        XCTAssertEqual(
+            StubProtocol.lastPath(containing: "/entitlements"), "/v1/customers/cust_1/entitlements")
+        let cached = await client.cachedEntitlements()
+        XCTAssertNotNil(cached)
+    }
+
+    func testTamperingAfterAVerifiedReadIsStillRejected() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        let cid = await client.customerId()
+        let verified = await client.cachedEntitlements()
+        XCTAssertNotNil(verified)
+
+        var entry = try storedEntitlements(storage, cid)
+        entry["body"] = Self.entitlementsBody(expiresAt: nil)
+        try restore(entry, storage, cid)
+        let tampered = await client.cachedEntitlements()
+        XCTAssertNil(tampered)
+    }
+
+    func testAMissingSignatureStillAnswersButIsNotCached() async throws {
+        StubProtocol.signsEntitlements = false
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        let fresh = try await client.entitlements()
+        XCTAssertEqual(fresh.entitlements.first?.isActive, true)
+        let cid = await client.customerId()
+        XCTAssertNil(storage.get("revnix.ent.\(cid)"))
+        XCTAssertNil(storage.get("revnix.entIndex"))
+    }
+
+    func testAnUnsignedReadDropsTheOlderSignedEntry() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        _ = try await client.entitlements()
+        let cid = await client.customerId()
+        XCTAssertNotNil(storage.get("revnix.ent.\(cid)"))
+        StubProtocol.signsEntitlements = false
+        _ = try await client.entitlements()
+        XCTAssertNil(storage.get("revnix.ent.\(cid)"))
+    }
+
+    func testAFutureFetchedAtCannotExtendTheTTLOrTheOfflineWindow() async throws {
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let clock = Clock(start: Date())
+        let storage = MemoryStorage()
+        let client = makeClient(now: { clock.now() }, storage: storage)
+        _ = try await client.entitlements()
+        let cid = await client.customerId()
+
+        var entry = try storedEntitlements(storage, cid)
+        entry["fetchedAt"] = 4_102_444_800_000
+        try restore(entry, storage, cid)
+
+        clock.advance(by: 60)
+        _ = try await client.entitlements()
+        XCTAssertEqual(StubProtocol.requestCount(containing: "/entitlements"), 2)
+
+        entry = try storedEntitlements(storage, cid)
+        entry["fetchedAt"] = 4_102_444_800_000
+        try restore(entry, storage, cid)
+        clock.advance(by: 15 * 24 * 3600)
+        StubProtocol.respond(containing: "/entitlements", status: 500, body: #"{"error":"down"}"#)
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.isActive, false)
     }
 
     // MARK: - Request timeout (spec: "C7 request timeout")
@@ -914,7 +1135,7 @@ final class RevnixClientTests: XCTestCase {
         let storage = MemoryStorage()
         let client = makeClient(storage: storage)
         for name in ["a", "b", "c"] { await client.track(name) }
-        XCTAssertEqual(try Self.queuedEvents(storage).count, 3)
+        try await waitUntil { (try? Self.queuedEvents(storage).count) == 3 }
 
         await client.flushEvents()
 
@@ -952,7 +1173,7 @@ final class RevnixClientTests: XCTestCase {
 
         await client.flushEvents()
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1)
-        XCTAssertEqual(try Self.queuedEvents(storage).count, 2)
+        try await waitUntil { (try? Self.queuedEvents(storage).count) == 2 }
 
         StubProtocol.respond(
             containing: "/v1/events", status: 200, body: Self.batchResults([201, 201]))
@@ -976,7 +1197,7 @@ final class RevnixClientTests: XCTestCase {
 
         await client.flushEvents()
         XCTAssertEqual(StubProtocol.requestCount(containing: "/v1/events"), 1)
-        XCTAssertEqual(try Self.queuedEvents(storage).count, 1)
+        try await waitUntil { (try? Self.queuedEvents(storage).count) == 1 }
     }
 
     func testAFlushTriggeredInsideTheHoldRunsWhenTheHoldEnds() async throws {
@@ -1035,6 +1256,7 @@ final class RevnixClientTests: XCTestCase {
 
         await client.track("newest")
 
+        try await waitUntil { storage.get("revnix.eventQueue")?.contains("newest") == true }
         let queued = try Self.queuedEvents(storage)
         XCTAssertEqual(queued.count, 1000)
         guard case .object(let first)? = queued.first?["body"],
@@ -1043,6 +1265,46 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertEqual(first["eventId"], .string("e1"))
         XCTAssertEqual(last["event"], .string("newest"))
         XCTAssertTrue(diagnostics.values.contains { $0.contains("queue full") })
+    }
+
+    func testGoingToTheBackgroundPersistsPendingEventsAtOnce() async throws {
+        StubProtocol.failWithConnectionError(containing: "/v1/events")
+        let storage = CountingStorage()
+        let handler = LifecycleHandler()
+        let client = makeClient(
+            storage: storage,
+            lifecycle: RevnixAppLifecycle { h in
+                handler.set(h)
+                return { handler.set(nil) }
+            })
+        try await waitUntil { handler.isSet }
+        await client.track("a")
+        XCTAssertNil(storage.get("revnix.eventQueue"))
+
+        handler.fire(.background)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNotNil(storage.get("revnix.eventQueue"))
+    }
+
+    func testABurstOfEventsWritesStorageOnceAndSurvivesIntoANewClient() async throws {
+        StubProtocol.failWithConnectionError(containing: "/v1/events")
+        let storage = CountingStorage()
+        let client = makeClient(storage: storage)
+        for i in 0..<50 { await client.track("burst", eventId: "e\(i)") }
+        XCTAssertEqual(storage.sets(of: "revnix.eventQueue"), 0)
+
+        try await waitUntil { storage.get("revnix.eventQueue") != nil }
+        XCTAssertLessThanOrEqual(storage.sets(of: "revnix.eventQueue"), 2)
+
+        StubProtocol.respond(
+            containing: "/v1/events", status: 200,
+            body: Self.batchResults(Array(repeating: 201, count: 50)))
+        let next = makeClient(storage: storage)
+        await next.flushEvents()
+        let sent = try Self.batchEvents(
+            try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/events")))
+        XCTAssertEqual(sent.map { $0["eventId"] }, (0..<50).map { .string("e\($0)") })
+        try await waitUntil { storage.get("revnix.eventQueue") == nil }
     }
 
     static let placementBodyRevision2 = placementBody.replacingOccurrences(
@@ -1730,6 +1992,46 @@ final class Clock: @unchecked Sendable {
     }
 }
 
+final class LifecycleHandler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (RevnixAppState) -> Void)?
+    func set(_ h: (@Sendable (RevnixAppState) -> Void)?) {
+        lock.lock()
+        defer { lock.unlock() }
+        handler = h
+    }
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler != nil
+    }
+    func fire(_ state: RevnixAppState) {
+        lock.lock()
+        let h = handler
+        lock.unlock()
+        h?(state)
+    }
+}
+
+final class CountingStorage: RevnixStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private let inner = MemoryStorage()
+    private var writes: [String: Int] = [:]
+    func get(_ key: String) -> String? { inner.get(key) }
+    func set(_ key: String, _ value: String) {
+        lock.lock()
+        writes[key, default: 0] += 1
+        lock.unlock()
+        inner.set(key, value)
+    }
+    func remove(_ key: String) { inner.remove(key) }
+    func sets(of key: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return writes[key] ?? 0
+    }
+}
+
 /// Thread-safe collector for diagnostic callbacks.
 final class Recorder: @unchecked Sendable {
     private let lock = NSLock()
@@ -1777,6 +2079,7 @@ final class StubProtocol: URLProtocol {
     /// spec's `mockResolvedValueOnce` sequencing).
     nonisolated(unsafe) private static var onceStubs: [(substring: String, stub: Stub)] = []
     nonisolated(unsafe) private static var recorded: [Recorded] = []
+    nonisolated(unsafe) static var signsEntitlements = true
 
     static func reset() {
         lock.lock()
@@ -1784,6 +2087,7 @@ final class StubProtocol: URLProtocol {
         stubs = []
         onceStubs = []
         recorded = []
+        signsEntitlements = true
     }
 
     static func respond(
@@ -1958,6 +2262,19 @@ final class StubProtocol: URLProtocol {
     private func deliver(_ stub: Stub) {
         var headerFields = stub.headers
         headerFields["Content-Type"] = "application/json"
+        let parts = (request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?
+            .percentEncodedPath ?? "").split(separator: "/")
+        if Self.signsEntitlements, stub.status == 200, stub.headers.isEmpty,
+            parts.last == "entitlements", parts.count >= 2,
+            let cid = parts[parts.count - 2].removingPercentEncoding
+        {
+            let apiKey = String(
+                (request.value(forHTTPHeaderField: "Authorization") ?? "").dropFirst("Bearer ".count)
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            headerFields.merge(
+                RevnixClientTests.signatureHeaders(stub.body, cid: cid, apiKey: apiKey)
+            ) { $1 }
+        }
         client?.urlProtocol(
             self,
             didReceive: HTTPURLResponse(
