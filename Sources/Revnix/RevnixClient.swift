@@ -44,10 +44,20 @@ public actor RevnixClient {
     private static let cachedEntitlementsTimeout: TimeInterval = 3
     private static let purchaseQueueCap = 100
     private static let purchaseMaxAgeMs = 30 * 24 * 3600 * 1000
+    private static let eventPersistDelay: TimeInterval = 1
+    static let entitlementKeys = [
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEsVQ+iVnl3H7IWe6uma8VASdqlJ09SrtOIKpxB5vF1xF7f3nD+SBzXlse1+skTi/jv/CLa4fUz9qGfZ4T8M+Nhw==",
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzGACMgBMy29LVcpzlmUFBRi4aiCB0FSitlLcO0k8fJ9q3foy22k2twy2U/qL0yVJHKQWWIEmt96dchyGlgDZHQ==",
+    ]
+    private let signingKeys: [P256.Signing.PublicKey]
+    private let apiKeyHash: String
+    private var verifiedEntitlements: [String: (raw: String, entry: CacheEntry)] = [:]
 
     private var eventFlush: Task<Void, Never>?
     private var eventTimer: Task<Void, Never>?
     private var eventRetryAt: Date = .distantPast
+    private var eventQueue: [QueuedEvent]?
+    private var eventPersist: Task<Void, Never>?
     private var inflightEntitlements: Task<CustomerEntitlements, Error>?
     private var bgFailures = 0
     /// REV-268: the encoded X-Revnix-Device value, built on the first resolve
@@ -111,6 +121,10 @@ public actor RevnixClient {
 
     public init(_ config: RevnixConfig) {
         self.config = config
+        self.signingKeys = config.entitlementKeys.compactMap {
+            Data(base64Encoded: $0).flatMap { try? P256.Signing.PublicKey(derRepresentation: $0) }
+        }
+        self.apiKeyHash = Self.sha256Hex(config.apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
         if let injected = config.session {
             self.session = injected
         } else {
@@ -369,7 +383,10 @@ public actor RevnixClient {
     }
 
     private func appStateChanged(_ state: RevnixAppState) async {
-        if state == .background { startEventFlush() }
+        if state == .background {
+            if eventPersist != nil { persistEvents(queuedEvents()) }
+            startEventFlush()
+        }
         guard implicitStarted, !implicitStopped else { return }
         switch state {
         case .background:
@@ -626,12 +643,22 @@ public actor RevnixClient {
     private func fetchFreshEntitlements(
         cid: String, nowMs: Int, timeout: TimeInterval? = nil
     ) async throws -> CustomerEntitlements {
-        let data = try await request(
+        let (data, response) = try await send(
             path: "/v1/customers/\(encode(cid))/entitlements", method: "GET", timeout: timeout)
         var snapshot = try decode(CustomerEntitlements.self, from: data)
         snapshot.stale = false
         snapshot.fetchedAt = nowMs
-        storeCacheEntry(CacheEntry(snapshot: snapshot, fetchedAt: nowMs), for: cid)
+        if let signedAt = response.value(forHTTPHeaderField: "Revnix-Signed-At"),
+            let signature = response.value(forHTTPHeaderField: "Revnix-Signature"),
+            let body = String(data: data, encoding: .utf8)
+        {
+            storeCacheEntry(
+                SignedEntitlements(
+                    body: body, signedAt: signedAt, signature: signature, fetchedAt: nowMs),
+                for: cid)
+        } else {
+            config.storage.remove(Keys.cache(cid))
+        }
         return snapshot
     }
 
@@ -1567,13 +1594,27 @@ public actor RevnixClient {
         }
     }
 
-    // ponytail: the whole queue is re-encoded per event; keep it in memory if 1000-item offline queues show up in profiles.
+    // ponytail: events persist at most once a second and on background; a crash, or a second client on the same storage, inside that window loses them.
     private func queuedEvents() -> [QueuedEvent] {
-        config.storage.get(Keys.eventQueue)
+        if let eventQueue { return eventQueue }
+        let loaded =
+            config.storage.get(Keys.eventQueue)
             .flatMap { try? JSONDecoder().decode([QueuedEvent].self, from: Data($0.utf8)) } ?? []
+        eventQueue = loaded
+        return loaded
+    }
+
+    private func scheduleEventPersist() {
+        guard eventPersist == nil else { return }
+        eventPersist = Task { [self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.eventPersistDelay * 1_000_000_000))
+            eventPersist = nil
+            persistEvents(queuedEvents())
+        }
     }
 
     private func persistEvents(_ events: [QueuedEvent]) {
+        eventQueue = events
         if events.isEmpty {
             config.storage.remove(Keys.eventQueue)
         } else if let data = try? JSONEncoder().encode(events) {
@@ -1588,7 +1629,8 @@ public actor RevnixClient {
             diagnostic(op: "eventQueue", message: "queue full, dropped the oldest event")
         }
         events.append(event)
-        persistEvents(events)
+        eventQueue = events
+        scheduleEventPersist()
         if events.count >= Self.eventFlushThreshold {
             startEventFlush()
         } else {
@@ -1795,7 +1837,22 @@ public actor RevnixClient {
         headers: [String: String] = [:],
         timeout: TimeInterval? = nil
     ) async throws -> Data {
-        var url = config.baseURL.appendingPathComponent(path)
+        try await send(
+            path: path, method: method, query: query, body: body, headers: headers,
+            timeout: timeout
+        ).0
+    }
+
+    private func send(
+        path: String, method: String, query: [URLQueryItem]? = nil,
+        body: [String: JSONValue]? = nil,
+        headers: [String: String] = [:],
+        timeout: TimeInterval? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        let base = config.baseURL.absoluteString
+        var url =
+            URL(string: (base.hasSuffix("/") ? String(base.dropLast()) : base) + path)
+            ?? config.baseURL.appendingPathComponent(path)
         if let query,
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         {
@@ -1844,7 +1901,7 @@ public actor RevnixClient {
                 status: http.statusCode, message: message,
                 retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
         }
-        return data
+        return (data, http)
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -1860,8 +1917,15 @@ public actor RevnixClient {
 
     // MARK: - Cache plumbing
 
-    private struct CacheEntry: Codable {
+    private struct CacheEntry {
         let snapshot: CustomerEntitlements
+        let fetchedAt: Int
+    }
+
+    private struct SignedEntitlements: Codable {
+        let body: String
+        let signedAt: String
+        let signature: String
         let fetchedAt: Int
     }
 
@@ -1930,13 +1994,33 @@ public actor RevnixClient {
     }
 
     private func cacheEntry(for cid: String) -> CacheEntry? {
-        guard let raw = config.storage.get(Keys.cache(cid)),
-            let data = raw.data(using: .utf8)
+        guard let raw = config.storage.get(Keys.cache(cid)) else {
+            verifiedEntitlements[cid] = nil
+            return nil
+        }
+        if let memo = verifiedEntitlements[cid], memo.raw == raw { return memo.entry }
+        verifiedEntitlements[cid] = nil
+        guard let stored = try? JSONDecoder().decode(SignedEntitlements.self, from: Data(raw.utf8)),
+            let signedAt = Int(stored.signedAt),
+            let der = Data(base64Encoded: stored.signature),
+            let signature = try? P256.Signing.ECDSASignature(derRepresentation: der)
         else { return nil }
-        return try? JSONDecoder().decode(CacheEntry.self, from: data)
+        let message = Data(
+            "\(stored.signedAt).\(apiKeyHash).\(Self.sha256Hex(cid)).\(stored.body)".utf8)
+        guard signingKeys.contains(where: { $0.isValidSignature(signature, for: message) }),
+            let snapshot = try? JSONDecoder().decode(
+                CustomerEntitlements.self, from: Data(stored.body.utf8))
+        else { return nil }
+        let entry = CacheEntry(snapshot: snapshot, fetchedAt: min(stored.fetchedAt, signedAt))
+        verifiedEntitlements[cid] = (raw, entry)
+        return entry
     }
 
-    private func storeCacheEntry(_ entry: CacheEntry, for cid: String) {
+    private static func sha256Hex(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func storeCacheEntry(_ entry: SignedEntitlements, for cid: String) {
         if let data = try? JSONEncoder().encode(entry),
             let raw = String(data: data, encoding: .utf8)
         {
@@ -2014,7 +2098,8 @@ public actor RevnixClient {
     }
 
     private func encode(_ segment: String) -> String {
-        segment.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-            ?? segment
+        segment.addingPercentEncoding(
+            withAllowedCharacters: CharacterSet.urlPathAllowed.subtracting(
+                CharacterSet(charactersIn: "/"))) ?? segment
     }
 }

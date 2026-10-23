@@ -148,6 +148,7 @@ public struct RevnixConfig: Sendable {
     public var attWaitTimeout: TimeInterval?
     /// Opt-in Apple App Attest evidence on install-related requests.
     public var deviceIntegrity: Bool
+    var entitlementKeys = RevnixClient.entitlementKeys
 
     public init(
         apiKey: String,
