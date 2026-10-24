@@ -250,7 +250,9 @@ final class ImplicitPlacementTests: XCTestCase {
 
         clockNow = t0.addingTimeInterval(5 * 60)
         handlerA?(.background)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        for _ in 0..<200 where storage.get("revnix.lastBackgroundAt") == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
 
         clockNow = t0.addingTimeInterval(2 * 3600)
         let clientB = RevnixClient(
