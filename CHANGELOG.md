@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.10.0 (2026-10-24)
+
 ### Changed
 
 - Entitlement cache is signed. The server signs each `GET /v1/customers/{customerId}/entitlements` 200 (ECDSA P-256 / SHA-256, `Revnix-Signed-At` and `Revnix-Signature` headers, bound to the API key and customer id). The SDK pins Revnix's public keys and only trusts a cached snapshot whose signature verifies for its own API key and customer; a tampered, legacy or foreign snapshot is treated as no cache. Cache age comes from the signed server time, so editing the stored time cannot extend the 30 s soft TTL or the 14-day offline window. A 200 without signature headers is returned but not cached, and drops an older cached entry. After upgrading, the first offline launch has no cached entitlements until one online read, and an offline cache needs the server to sign. This stops edits to the cache file, not a user who patches the app binary on a rooted or jailbroken device.
@@ -26,11 +28,14 @@
 - `handleDeepLink` reports only scheme, host, path and known attribution query params (utm_*, campaign_id, pid, gclid, gbraid, wbraid, ttclid, sccid, twclid, revnix_link, web_id and similar). Other query params, the fragment and credentials are dropped before upload. `resolveDeepLink` still sends the full URL.
 
 ## 1.8.1 (2026-10-17)
+## 1.8.1 (2026-10-17)
 
 ### Changed
 
 - Privacy manifest: `NSPrivacyTracking` is now `true`, and Device ID (IDFA) and Purchase History are declared as used for tracking with the developer advertising purpose, since ad network integrations receive purchase events, and the IDFA once the user allows tracking. `NSPrivacyTrackingDomains` is left out so iOS never blocks the Revnix API for users who deny ATT.
 
+## 1.8.0 (2026-10-14)
+## 1.8.0 (2026-10-14)
 ## 1.8.0 (2026-10-14)
 ## 1.8.0 (2026-10-14)
 
@@ -42,11 +47,23 @@
 ## 1.7.0 (2026-10-13)
 ## 1.7.0 (2026-10-13)
 ## 1.7.0 (2026-10-13)
+## 1.7.0 (2026-10-13)
+## 1.7.0 (2026-10-13)
+## 1.7.0 (2026-10-13)
+## 1.7.0 (2026-10-13)
 
 ### Added
 
 - Paywall blocks: `timer` (countdown to a date or from when the paywall opens), `video` (muted looping clip with a poster), `toggle` (free-trial switch that flips the selected package) and the card `carousel` layout (swipeable pages with dots and optional auto-advance).
 
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
+## 1.6.0 (2026-10-12)
 ## 1.6.0 (2026-10-12)
 ## 1.6.0 (2026-10-12)
 ## 1.6.0 (2026-10-12)
@@ -72,6 +89,22 @@
 - The purchase retry queue keeps at most 100 purchases and drops ones queued
   more than 30 days ago.
 
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
+## 1.5.0 (2026-10-08)
 ## 1.5.0 (2026-10-08)
 ## 1.5.0 (2026-10-08)
 ## 1.5.0 (2026-10-08)
@@ -123,6 +156,38 @@ Changes since 1.4.1 were not recorded here; see the commit log.
 ## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
 ## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
+## 1.4.1 (2026-10-08)
 
 ### Changed
 
@@ -130,6 +195,70 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   1.4.1 to match `react-native-revnix` and `revnix-capacitor`, no API
   changes.
 
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
+## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
 ## 0.4.0 (2026-10-08)
@@ -259,6 +388,134 @@ Changes since 1.4.1 were not recorded here; see the commit log.
   `onImplicitPaywall` handler; a paywall shows only when implicit placements
   and `deeplink_open` are configured. `start()` after `stop()` resumes this.
 
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
+## 0.3.0
 ## 0.3.0
 ## 0.3.0
 ## 0.3.0
