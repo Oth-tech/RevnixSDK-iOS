@@ -905,6 +905,47 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertNil(events[1]["durationMs"])
     }
 
+    func testPaywallDisplayCarriesCappedProductsShown() async throws {
+        StubProtocol.respond(containing: "/v1/paywalls/viewed", status: 200, body: "{}")
+        let client = makeClient()
+        func shown() throws -> [JSONValue]? {
+            let raw = try XCTUnwrap(StubProtocol.lastBody(containing: "/v1/paywalls/viewed"))
+            let obj = try JSONDecoder().decode([String: JSONValue].self, from: Data(raw.utf8))
+            guard case .array(let a)? = obj["productsShown"] else { return nil }
+            return a
+        }
+
+        await client.logPaywallDisplay(placementKey: "main", paywallId: "pw_1")
+        XCTAssertNil(try shown())
+
+        await client.logPaywallDisplay(
+            placementKey: "main", paywallId: "pw_1",
+            productsShown: [
+                RevnixPaywallProductShown(
+                    productId: "a", priceLabel: "$4.99", amountMinor: 499, currency: "USD"),
+                RevnixPaywallProductShown(productId: "b"),
+            ])
+        let two = try XCTUnwrap(try shown())
+        XCTAssertEqual(
+            two,
+            [
+                .object([
+                    "productId": .string("a"), "priceLabel": .string("$4.99"),
+                    "amountMinor": .number(499), "currency": .string("USD"),
+                ]),
+                .object(["productId": .string("b")]),
+            ])
+
+        let label = String(repeating: "x", count: 80)
+        await client.logPaywallDisplay(
+            placementKey: "main", paywallId: "pw_1",
+            productsShown: (0..<25).map { RevnixPaywallProductShown(productId: "p\($0)", priceLabel: label) })
+        let many = try XCTUnwrap(try shown())
+        XCTAssertEqual(many.count, 20)
+        guard case .object(let first) = many[0] else { return XCTFail("not an object") }
+        XCTAssertEqual(first["priceLabel"], .string(String(repeating: "x", count: 64)))
+    }
+
     func testDecisionIdSurvivesThePendingPurchaseQueue() async throws {
         StubProtocol.failWithConnectionError(containing: "/v1/purchases")
         let client = makeClient()
