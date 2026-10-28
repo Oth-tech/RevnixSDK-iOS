@@ -176,7 +176,8 @@ public protocol RevnixPaywallViewReporting: Sendable {
 
     func logPaywallDisplay(
         placementKey: String?, paywallId: String?, decisionId: String?, priceShown: Double?,
-        screenIndex: Int?, blockId: String?, durationMs: Int?
+        screenIndex: Int?, blockId: String?, durationMs: Int?,
+        productsShown: [RevnixPaywallProductShown]?
     ) async -> String?
 
     func logPaywallClosed(
@@ -221,7 +222,8 @@ public extension RevnixPaywallViewReporting {
 
     func logPaywallDisplay(
         placementKey: String?, paywallId: String?, decisionId: String?, priceShown: Double?,
-        screenIndex: Int?, blockId: String?, durationMs: Int?
+        screenIndex: Int?, blockId: String?, durationMs: Int?,
+        productsShown: [RevnixPaywallProductShown]?
     ) async -> String? {
         await logPaywallDisplay(placementKey: placementKey, paywallId: paywallId)
     }
@@ -615,12 +617,20 @@ public struct RevnixPaywallView: View {
         let placementKey = placementKey
         let paywallId = paywallId
         let decisionId = decisionId
+        let productsShown = shown.compactMap { pkg in
+            pkg.productId.map {
+                RevnixPaywallProductShown(
+                    productId: $0, priceLabel: pkg.priceLabel, amountMinor: pkg.amountMinor,
+                    currency: pkg.currency)
+            }
+        }
         viewReport = Task {
             // A reporter that predates REV-252 answers nil; the close then
             // still fires, it just cannot be paired with this display.
             await client.logPaywallDisplay(
                 placementKey: placementKey, paywallId: paywallId, decisionId: decisionId,
-                priceShown: nil, screenIndex: nil, blockId: nil, durationMs: nil)
+                priceShown: nil, screenIndex: nil, blockId: nil, durationMs: nil,
+                productsShown: productsShown)
         }
     }
 

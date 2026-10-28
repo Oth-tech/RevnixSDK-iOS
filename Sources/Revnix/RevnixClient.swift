@@ -1338,11 +1338,12 @@ public actor RevnixClient {
     }
 
     /// `decisionId` is `PlacementResolution.decisionId` of the paywall shown.
+    /// `productsShown` lists the products on screen (at most 20, labels cut to 64 characters).
     @discardableResult
     public func logPaywallDisplay(
         placementKey: String?, paywallId: String?, decisionId: String? = nil,
         priceShown: Double? = nil, screenIndex: Int? = nil, blockId: String? = nil,
-        durationMs: Int? = nil
+        durationMs: Int? = nil, productsShown: [RevnixPaywallProductShown]? = nil
     ) async -> String? {
         let viewId = UUID().uuidString.lowercased()
         // REV-272 LOOP GUARD: a display whose placement is one of the six came
@@ -1368,6 +1369,16 @@ public actor RevnixClient {
         addAttribution(
             &body, decisionId: decisionId, priceShown: priceShown, screenIndex: screenIndex,
             blockId: blockId, durationMs: durationMs)
+        if let shown = productsShown, !shown.isEmpty {
+            body["productsShown"] = .array(
+                shown.prefix(20).map { p in
+                    var o: [String: JSONValue] = ["productId": .string(p.productId)]
+                    if let v = p.priceLabel { o["priceLabel"] = .string(String(v.prefix(64))) }
+                    if let v = p.amountMinor { o["amountMinor"] = .number(Double(v)) }
+                    if let v = p.currency { o["currency"] = .string(v) }
+                    return .object(o)
+                })
+        }
         do {
             _ = try await request(path: "/v1/paywalls/viewed", method: "POST", body: body)
         } catch {
@@ -2101,5 +2112,23 @@ public actor RevnixClient {
         segment.addingPercentEncoding(
             withAllowedCharacters: CharacterSet.urlPathAllowed.subtracting(
                 CharacterSet(charactersIn: "/"))) ?? segment
+    }
+}
+
+/// One product visible on a displayed paywall, reported on the display beacon.
+public struct RevnixPaywallProductShown: Sendable, Equatable {
+    public let productId: String
+    public let priceLabel: String?
+    public let amountMinor: Int?
+    public let currency: String?
+
+    public init(
+        productId: String, priceLabel: String? = nil, amountMinor: Int? = nil,
+        currency: String? = nil
+    ) {
+        self.productId = productId
+        self.priceLabel = priceLabel
+        self.amountMinor = amountMinor
+        self.currency = currency
     }
 }
