@@ -180,50 +180,17 @@ final class RevnixClientTests: XCTestCase {
         } catch {}
     }
 
-    func cachedAfterARead(signedWith headers: [String: String]) async throws
-        -> CustomerEntitlements?
-    {
+    func testCorrectlyBoundHeadersAreStoredAndServed() async throws {
         StubProtocol.respond(
             containing: "/entitlements", status: 200, body: Self.entitlementsBody,
-            headers: headers)
+            headers: Self.signatureHeaders(Self.entitlementsBody, cid: "cust_1"))
         let storage = MemoryStorage()
         storage.set("revnix.customerId", "cust_1")
         let client = makeClient(storage: storage, entitlementsTTL: 0)
         _ = try await client.entitlements()
         XCTAssertNotNil(storage.get("revnix.ent.cust_1"))
-        return await client.cachedEntitlements()
-    }
-
-    func testCorrectlyBoundHeadersAreServed() async throws {
-        let cached = try await cachedAfterARead(
-            signedWith: Self.signatureHeaders(Self.entitlementsBody, cid: "cust_1"))
+        let cached = await client.cachedEntitlements()
         XCTAssertNotNil(cached)
-    }
-
-    func testATamperedSignatureIsNotServed() async throws {
-        let cached = try await cachedAfterARead(
-            signedWith: Self.signatureHeaders(Self.entitlementsBody(expiresAt: 1), cid: "cust_1"))
-        XCTAssertNil(cached)
-    }
-
-    func testASignatureFromAnUnpinnedKeyIsRejected() async throws {
-        let cached = try await cachedAfterARead(
-            signedWith: Self.signatureHeaders(
-                Self.entitlementsBody, cid: "cust_1", key: P256.Signing.PrivateKey()))
-        XCTAssertNil(cached)
-    }
-
-    func testABlobSignedForAnotherCustomerIsRejected() async throws {
-        let cached = try await cachedAfterARead(
-            signedWith: Self.signatureHeaders(Self.entitlementsBody, cid: "cust_2"))
-        XCTAssertNil(cached)
-    }
-
-    func testABlobSignedForAnotherApiKeyIsRejected() async throws {
-        let cached = try await cachedAfterARead(
-            signedWith: Self.signatureHeaders(
-                Self.entitlementsBody, cid: "cust_1", apiKey: "rvx_pk_test_other"))
-        XCTAssertNil(cached)
     }
 
     func testAnIdWithReservedCharactersTravelsAsOneSegmentAndIsCached() async throws {
@@ -284,28 +251,112 @@ final class RevnixClientTests: XCTestCase {
         XCTAssertNil(tampered)
     }
 
-    func testAMissingSignatureStillAnswersButIsNotCached() async throws {
+    func testAMissingSignatureIsRejectedAndNotCached() async throws {
         StubProtocol.signsEntitlements = false
         StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
         let storage = MemoryStorage()
         let client = makeClient(storage: storage, entitlementsTTL: 0)
-        let fresh = try await client.entitlements()
-        XCTAssertEqual(fresh.entitlements.first?.isActive, true)
+        do {
+            _ = try await client.entitlements()
+            XCTFail("expected an unsigned response to be rejected")
+        } catch let err as RevnixError {
+            XCTAssertEqual(err, .badResponse)
+        }
         let cid = await client.customerId()
         XCTAssertNil(storage.get("revnix.ent.\(cid)"))
         XCTAssertNil(storage.get("revnix.entIndex"))
     }
 
-    func testAnUnsignedReadDropsTheOlderSignedEntry() async throws {
+    func testAnUnsignedReadKeepsAndServesTheOlderSignedEntry() async throws {
         StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
         let storage = MemoryStorage()
         let client = makeClient(storage: storage, entitlementsTTL: 0)
         _ = try await client.entitlements()
         let cid = await client.customerId()
-        XCTAssertNotNil(storage.get("revnix.ent.\(cid)"))
+        let before = storage.get("revnix.ent.\(cid)")
+        XCTAssertNotNil(before)
         StubProtocol.signsEntitlements = false
+        StubProtocol.respond(
+            containing: "/entitlements", status: 200,
+            body: Self.entitlementsBody(expiresAt: nil))
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true)
+        XCTAssertEqual(served.entitlements.first?.expiresAt, 4_102_444_800_000)
+        XCTAssertEqual(storage.get("revnix.ent.\(cid)"), before)
+    }
+
+    private func assertLiveResponseRejected(
+        body: (String) -> String = { $0 },
+        headers: (String, String) -> [String: String],
+        file: StaticString = #filePath, line: UInt = #line
+    ) async throws {
+        let storage = MemoryStorage()
+        let client = makeClient(storage: storage, entitlementsTTL: 0)
+        let cid = await client.customerId()
+        StubProtocol.respond(containing: "/entitlements", status: 200, body: Self.entitlementsBody)
         _ = try await client.entitlements()
-        XCTAssertNil(storage.get("revnix.ent.\(cid)"))
+        let before = storage.get("revnix.ent.\(cid)")
+        XCTAssertNotNil(before, file: file, line: line)
+
+        let forged = body(Self.entitlementsBody(expiresAt: nil))
+        StubProtocol.respond(
+            containing: "/entitlements", status: 200, body: forged,
+            headers: headers(Self.entitlementsBody(expiresAt: nil), cid))
+        let served = try await client.entitlements()
+        XCTAssertEqual(served.stale, true, file: file, line: line)
+        XCTAssertEqual(served.entitlements.first?.expiresAt, 4_102_444_800_000, file: file, line: line)
+        XCTAssertEqual(storage.get("revnix.ent.\(cid)"), before, file: file, line: line)
+
+        let fresh = MemoryStorage()
+        fresh.set("revnix.customerId", cid)
+        let bare = makeClient(storage: fresh, entitlementsTTL: 0)
+        do {
+            _ = try await bare.entitlements()
+            XCTFail("expected a rejected live response", file: file, line: line)
+        } catch let err as RevnixError {
+            XCTAssertEqual(err, .badResponse, file: file, line: line)
+        }
+        XCTAssertNil(fresh.get("revnix.ent.\(cid)"), file: file, line: line)
+    }
+
+    func testALiveTamperedBodyIsRejected() async throws {
+        try await assertLiveResponseRejected(
+            body: { $0.replacingOccurrences(of: "\"cursor\":5", with: "\"cursor\":6") },
+            headers: { signed, cid in Self.signatureHeaders(signed, cid: cid) })
+    }
+
+    func testALiveSignatureFromAnUnpinnedKeyIsRejected() async throws {
+        try await assertLiveResponseRejected(
+            headers: { signed, cid in
+                Self.signatureHeaders(signed, cid: cid, key: P256.Signing.PrivateKey())
+            })
+    }
+
+    func testALiveSignatureForAnotherCustomerIsRejected() async throws {
+        try await assertLiveResponseRejected(
+            headers: { signed, _ in Self.signatureHeaders(signed, cid: "someone_else") })
+    }
+
+    func testALiveSignatureForAnotherApiKeyIsRejected() async throws {
+        try await assertLiveResponseRejected(
+            headers: { signed, cid in
+                Self.signatureHeaders(signed, cid: cid, apiKey: "rvx_pk_test_other")
+            })
+    }
+
+    func testWaitForEntitlementsDoesNotResolveOnAnUnsignedResponse() async throws {
+        StubProtocol.respondOnce(
+            containing: "/entitlements", status: 200, body: Self.entitlementsBody)
+        let client = makeClient(readYourWritesDelays: [0.01, 0.01])
+        _ = try await client.entitlements()
+        StubProtocol.signsEntitlements = false
+        StubProtocol.respond(
+            containing: "/entitlements", status: 200,
+            body: """
+                {"customerId":"cust_1","cursor":9,"entitlements":[{"entitlementId":"pro","isActive":true,"expiresAt":4102444800000,"sources":[]}]}
+                """)
+        let settled = try await client.waitForEntitlements(seq: 9)
+        XCTAssertEqual(settled.cursor, 7)
     }
 
     func testAFutureFetchedAtCannotExtendTheTTLOrTheOfflineWindow() async throws {

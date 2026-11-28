@@ -72,14 +72,17 @@ import XCTest
         {
             let sessionConfig = URLSessionConfiguration.ephemeral
             sessionConfig.protocolClasses = [StubProtocol.self]
-            return RevnixClient(
-                RevnixConfig(
-                    apiKey: "rvx_pk_test_abc",
-                    baseURL: URL(string: "https://example.convex.site")!,
-                    storage: storage,
-                    entitlementsTTL: 0,
-                    session: URLSession(configuration: sessionConfig)
-                ))
+            var config = RevnixConfig(
+                apiKey: "rvx_pk_test_abc",
+                baseURL: URL(string: "https://example.convex.site")!,
+                storage: storage,
+                entitlementsTTL: 0,
+                session: URLSession(configuration: sessionConfig)
+            )
+            config.entitlementKeys = [
+                RevnixClientTests.signingKey.publicKey.derRepresentation.base64EncodedString()
+            ]
+            return RevnixClient(config)
         }
 
         /// tap → StoreKit purchase → registerPurchase WITH JWS proof → the
