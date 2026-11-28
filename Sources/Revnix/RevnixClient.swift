@@ -645,20 +645,17 @@ public actor RevnixClient {
     ) async throws -> CustomerEntitlements {
         let (data, response) = try await send(
             path: "/v1/customers/\(encode(cid))/entitlements", method: "GET", timeout: timeout)
+        guard let signedAt = response.value(forHTTPHeaderField: "Revnix-Signed-At"),
+            let signature = response.value(forHTTPHeaderField: "Revnix-Signature"),
+            let body = String(data: data, encoding: .utf8),
+            isValidSignature(body: body, signedAt: signedAt, signature: signature, cid: cid)
+        else { throw RevnixError.badResponse }
         var snapshot = try decode(CustomerEntitlements.self, from: data)
         snapshot.stale = false
         snapshot.fetchedAt = nowMs
-        if let signedAt = response.value(forHTTPHeaderField: "Revnix-Signed-At"),
-            let signature = response.value(forHTTPHeaderField: "Revnix-Signature"),
-            let body = String(data: data, encoding: .utf8)
-        {
-            storeCacheEntry(
-                SignedEntitlements(
-                    body: body, signedAt: signedAt, signature: signature, fetchedAt: nowMs),
-                for: cid)
-        } else {
-            config.storage.remove(Keys.cache(cid))
-        }
+        storeCacheEntry(
+            SignedEntitlements(body: body, signedAt: signedAt, signature: signature, fetchedAt: nowMs),
+            for: cid)
         return snapshot
     }
 
@@ -2013,18 +2010,25 @@ public actor RevnixClient {
         verifiedEntitlements[cid] = nil
         guard let stored = try? JSONDecoder().decode(SignedEntitlements.self, from: Data(raw.utf8)),
             let signedAt = Int(stored.signedAt),
-            let der = Data(base64Encoded: stored.signature),
-            let signature = try? P256.Signing.ECDSASignature(derRepresentation: der)
-        else { return nil }
-        let message = Data(
-            "\(stored.signedAt).\(apiKeyHash).\(Self.sha256Hex(cid)).\(stored.body)".utf8)
-        guard signingKeys.contains(where: { $0.isValidSignature(signature, for: message) }),
+            isValidSignature(
+                body: stored.body, signedAt: stored.signedAt, signature: stored.signature, cid: cid),
             let snapshot = try? JSONDecoder().decode(
                 CustomerEntitlements.self, from: Data(stored.body.utf8))
         else { return nil }
         let entry = CacheEntry(snapshot: snapshot, fetchedAt: min(stored.fetchedAt, signedAt))
         verifiedEntitlements[cid] = (raw, entry)
         return entry
+    }
+
+    private func isValidSignature(body: String, signedAt: String, signature: String, cid: String)
+        -> Bool
+    {
+        guard Int(signedAt) != nil,
+            let der = Data(base64Encoded: signature),
+            let parsed = try? P256.Signing.ECDSASignature(derRepresentation: der)
+        else { return false }
+        let message = Data("\(signedAt).\(apiKeyHash).\(Self.sha256Hex(cid)).\(body)".utf8)
+        return signingKeys.contains { $0.isValidSignature(parsed, for: message) }
     }
 
     private static func sha256Hex(_ value: String) -> String {
